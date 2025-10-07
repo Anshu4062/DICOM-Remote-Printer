@@ -1,0 +1,610 @@
+"use client";
+
+import { useState, useEffect, useRef } from "react";
+import { useRouter } from "next/navigation";
+
+interface User {
+  id: string;
+  name: string;
+  email: string;
+}
+
+export default function Dashboard() {
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMessage, setUploadMessage] = useState("");
+  // storescu UI state (client-only)
+  const [callingAET, setCallingAET] = useState("");
+  const [calledAET, setCalledAET] = useState("");
+  const [peerHost, setPeerHost] = useState("");
+  const [peerPort, setPeerPort] = useState("");
+  const [profiles, setProfiles] = useState<
+    Array<{
+      id: string;
+      name: string;
+      callingAET: string;
+      calledAET: string;
+      host: string;
+      port: string;
+    }>
+  >([]);
+  const [selectedProfileId, setSelectedProfileId] = useState("");
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const profileMenuRef = useRef<HTMLDivElement | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [toastMsg, setToastMsg] = useState("");
+  const router = useRouter();
+
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    const userData = localStorage.getItem("user");
+
+    if (!token || !userData) {
+      router.push("/login");
+      return;
+    }
+
+    try {
+      setUser(JSON.parse(userData));
+    } catch (error) {
+      console.error("Error parsing user data:", error);
+      router.push("/login");
+    } finally {
+      setLoading(false);
+    }
+  }, [router]);
+
+  // Load saved storescu profiles on mount
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("storescuProfiles") || "[]";
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        setProfiles(parsed);
+      }
+    } catch {}
+  }, []);
+
+  // Close the profile dropdown on outside click
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (!profileMenuRef.current) return;
+      if (!profileMenuRef.current.contains(e.target as Node)) {
+        setProfileMenuOpen(false);
+      }
+    };
+    if (profileMenuOpen) window.addEventListener("click", onClick);
+    return () => window.removeEventListener("click", onClick);
+  }, [profileMenuOpen]);
+
+  const handleSaveProfile = () => {
+    if (isSaving) return; // cooldown active
+    setIsSaving(true);
+    setTimeout(() => {
+      // Always create a new profile so previous ones remain in the list
+      const id = Math.random().toString(36).slice(2);
+      const name = `${peerHost || "host"}:${peerPort || "port"} (${
+        calledAET || "AE"
+      })`;
+      const updated = [
+        ...profiles,
+        { id, name, callingAET, calledAET, host: peerHost, port: peerPort },
+      ];
+      setProfiles(updated);
+      localStorage.setItem("storescuProfiles", JSON.stringify(updated));
+      setSelectedProfileId(id);
+
+      // Show success toast
+      const ae = callingAET || "AE";
+      setToastMsg(`Saved: ${ae}`);
+      setTimeout(() => setToastMsg(""), 800);
+      setIsSaving(false);
+    }, 1000);
+  };
+
+  const handleSelectProfile = (id: string) => {
+    setSelectedProfileId(id);
+    const p = profiles.find((x) => x.id === id);
+    if (!p) return;
+    setCallingAET(p.callingAET);
+    setCalledAET(p.calledAET);
+    setPeerHost(p.host);
+    setPeerPort(p.port);
+  };
+
+  const handleDeleteProfile = () => {
+    if (!selectedProfileId) return;
+    const updated = profiles.filter((p) => p.id !== selectedProfileId);
+    setProfiles(updated);
+    localStorage.setItem("storescuProfiles", JSON.stringify(updated));
+    setSelectedProfileId("");
+  };
+
+  const handleLogout = async () => {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {}
+    localStorage.removeItem("token");
+    localStorage.removeItem("user");
+    router.push("/login");
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Allow DICOM files (with or without extension) and ZIP archives
+    const allowedExtensions = [
+      ".dcm",
+      ".dicom",
+      ".DCM",
+      ".DICOM",
+      ".zip",
+      ".ZIP",
+      "",
+    ]; // empty covers files without extension
+    const lastDot = file.name.lastIndexOf(".");
+    const fileExtension = lastDot >= 0 ? file.name.substring(lastDot) : "";
+
+    setUploading(true);
+    setUploadMessage("");
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("userId", user?.id || "");
+
+      const response = await fetch("/api/upload/dicom", {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        setUploadMessage("DICOM file uploaded successfully!");
+      } else {
+        setUploadMessage(data.error || "Upload failed");
+      }
+    } catch (error) {
+      setUploadMessage("An error occurred during upload");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-lg">Loading...</div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return null;
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      {/* Header */}
+      <header className="bg-white shadow">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex justify-between items-center py-6">
+            <div>
+              <h1 className="text-3xl font-bold text-gray-900">
+                Welcome, {user.name}!
+              </h1>
+              <p className="text-gray-600">{user.email}</p>
+            </div>
+            <button
+              onClick={handleLogout}
+              className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-md text-sm font-medium"
+            >
+              Logout
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+        {toastMsg && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center">
+            <div className="absolute inset-0 bg-black/40" />
+            <div className="relative mx-4 w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl ring-1 ring-black/10">
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-green-100">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                    className="h-6 w-6 text-green-600"
+                  >
+                    <path
+                      fillRule="evenodd"
+                      d="M10.28 15.22a.75.75 0 01-1.06 0l-3-3a.75.75 0 111.06-1.06l2.47 2.47 5.47-5.47a.75.75 0 111.06 1.06l-6 6z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                </div>
+                <div>
+                  <div className="text-base font-semibold text-gray-900">
+                    Saved
+                  </div>
+                  <div className="mt-1 text-sm text-gray-600">{toastMsg}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        <div className="px-4 py-6 sm:px-0">
+          <div className="bg-white overflow-hidden shadow rounded-lg transition-shadow duration-200 hover:shadow-md">
+            <div className="px-4 py-5 sm:p-6">
+              <h2 className="text-lg font-medium text-gray-900 mb-4">
+                Upload DICOM Images
+              </h2>
+
+              <div className="group border-2 border-dashed border-gray-300 rounded-lg p-6 transition-colors duration-200 hover:border-primary-300">
+                <div className="text-center">
+                  <svg
+                    className="mx-auto h-12 w-12 text-gray-400 transition-colors duration-200 group-hover:text-primary-400"
+                    stroke="currentColor"
+                    fill="none"
+                    viewBox="0 0 48 48"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02"
+                      strokeWidth={2}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  <div className="mt-4">
+                    <label
+                      htmlFor="file-upload"
+                      className="cursor-pointer bg-white rounded-md font-medium text-primary-600 hover:text-primary-700 transition-colors duration-150 focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-primary-500"
+                    >
+                      <span>Upload DICOM file</span>
+                      <input
+                        id="file-upload"
+                        name="file-upload"
+                        type="file"
+                        className="sr-only"
+                        accept=".dcm,.dicom,.zip,application/zip,*/*"
+                        onChange={handleFileUpload}
+                        disabled={uploading}
+                      />
+                    </label>
+                    <p className="pl-1">or drag and drop</p>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">
+                    DICOM files (.dcm or without extension) or ZIP archives
+                    containing DICOMs
+                  </p>
+                </div>
+              </div>
+
+              {uploading && (
+                <div className="mt-4 text-center">
+                  <div className="inline-flex items-center">
+                    <svg
+                      className="animate-spin -ml-1 mr-3 h-5 w-5 text-primary-600"
+                      xmlns="http://www.w3.org/2000/svg"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                    >
+                      <circle
+                        className="opacity-25"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        stroke="currentColor"
+                        strokeWidth="4"
+                      ></circle>
+                      <path
+                        className="opacity-75"
+                        fill="currentColor"
+                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                      ></path>
+                    </svg>
+                    Uploading...
+                  </div>
+                </div>
+              )}
+
+              {uploadMessage && (
+                <div
+                  className={`mt-4 text-center text-sm ${
+                    uploadMessage.includes("successfully")
+                      ? "text-green-600"
+                      : "text-red-600"
+                  }`}
+                >
+                  {uploadMessage}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* DICOM Network (storescu) Settings */}
+          <div className="mt-6 bg-white overflow-hidden shadow rounded-lg transition-shadow duration-200 hover:shadow-md">
+            <div className="px-4 py-5 sm:p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-medium text-gray-900">
+                  DICOM Network (C-STORE) Settings
+                </h2>
+                <div className="flex items-center gap-3">
+                  <div className="relative inline-block" ref={profileMenuRef}>
+                    <button
+                      type="button"
+                      onClick={() => setProfileMenuOpen((v) => !v)}
+                      className="inline-flex w-60 items-center justify-between rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm transition hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                    >
+                      <span className="truncate">
+                        {selectedProfileId
+                          ? profiles.find((p) => p.id === selectedProfileId)
+                              ?.name || "Endpoint"
+                          : "Select saved endpoint…"}
+                      </span>
+                      <svg
+                        className={`ml-2 h-4 w-4 text-gray-500 transition-transform ${
+                          profileMenuOpen ? "rotate-180" : ""
+                        }`}
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 20 20"
+                        fill="currentColor"
+                        aria-hidden="true"
+                      >
+                        <path
+                          fillRule="evenodd"
+                          d="M5.23 7.21a.75.75 0 011.06.02L10 10.94l3.71-3.71a.75.75 0 111.06 1.06l-4.24 4.24a.75.75 0 01-1.06 0L5.25 8.27a.75.75 0 01-.02-1.06z"
+                          clipRule="evenodd"
+                        />
+                      </svg>
+                    </button>
+                    {profileMenuOpen && (
+                      <div className="absolute right-0 z-10 mt-2 w-72 origin-top-right rounded-lg bg-white p-2 text-sm shadow-lg ring-1 ring-black/5 max-h-64 overflow-auto">
+                        {profiles.length === 0 && (
+                          <div className="px-3 py-2 text-gray-500">
+                            No saved endpoints
+                          </div>
+                        )}
+                        {profiles.map((p) => (
+                          <button
+                            key={p.id}
+                            onClick={() => {
+                              handleSelectProfile(p.id);
+                              setProfileMenuOpen(false);
+                            }}
+                            className="block w-full rounded-md px-3 py-2 text-left text-gray-700 hover:bg-gray-50"
+                          >
+                            {p.name}
+                          </button>
+                        ))}
+                        {profiles.length > 0 && (
+                          <button
+                            onClick={() => {
+                              setSelectedProfileId("");
+                              setCallingAET("");
+                              setCalledAET("");
+                              setPeerHost("");
+                              setPeerPort("");
+                              setProfileMenuOpen(false);
+                            }}
+                            className="mt-1 block w-full rounded-md px-3 py-2 text-left text-gray-500 hover:bg-gray-50"
+                          >
+                            Clear selection
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    onClick={handleDeleteProfile}
+                    className="inline-flex items-center text-sm px-4 py-2 rounded-md bg-red-600 text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-colors"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1 leading-6 whitespace-nowrap">
+                    Your AE Title
+                  </label>
+                  <input
+                    className="block w-full rounded-lg border border-gray-300 bg-white text-gray-900 placeholder-gray-400 focus:outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-500 sm:text-sm px-3 py-2 transition"
+                    value={callingAET}
+                    onChange={(e) => setCallingAET(e.target.value)}
+                    placeholder="Enter your AE title"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1 leading-6 whitespace-nowrap">
+                    Remote Server AE Title
+                  </label>
+                  <input
+                    className="block w-full rounded-lg border border-gray-300 bg-white text-gray-900 placeholder-gray-400 focus:outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-500 sm:text-sm px-3 py-2 transition"
+                    value={calledAET}
+                    onChange={(e) => setCalledAET(e.target.value)}
+                    placeholder="Enter the remote AE title"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1 leading-6 whitespace-nowrap">
+                    Remote Peer Host
+                  </label>
+                  <input
+                    className="block w-full rounded-lg border border-gray-300 bg-white text-gray-900 placeholder-gray-400 focus:outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-500 sm:text-sm px-3 py-2 transition"
+                    value={peerHost}
+                    onChange={(e) => setPeerHost(e.target.value)}
+                    placeholder="Enter the peer host"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1 leading-6 whitespace-nowrap">
+                    Port
+                  </label>
+                  <input
+                    className="block w-full rounded-lg border border-gray-300 bg-white text-gray-900 placeholder-gray-400 focus:outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-500 sm:text-sm px-3 py-2 transition"
+                    value={peerPort}
+                    onChange={(e) => setPeerPort(e.target.value)}
+                    placeholder="Enter the port"
+                  />
+                </div>
+              </div>
+
+              <div className="mt-4 flex gap-3">
+                <button
+                  onClick={handleSaveProfile}
+                  disabled={isSaving}
+                  className={`inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white focus:outline-none focus:ring-2 focus:ring-offset-2 transition-colors ${
+                    isSaving
+                      ? "bg-primary-400 cursor-not-allowed"
+                      : "bg-primary-600 hover:bg-primary-700 focus:ring-primary-500"
+                  }`}
+                >
+                  {isSaving ? "Saving…" : "Save Endpoint"}
+                </button>
+                <button
+                  onClick={async () => {
+                    if (!user) return;
+                    const res = await fetch("/api/dicom/send", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        userId: user.id,
+                        callingAET,
+                        calledAET,
+                        host: peerHost,
+                        port: peerPort,
+                      }),
+                    });
+                    const data = await res.json();
+                    if (res.ok) {
+                      setToastMsg("C-STORE sent");
+                      setTimeout(() => setToastMsg(""), 1000);
+                    } else {
+                      const details =
+                        data.stderr ||
+                        data.stdout ||
+                        data.error ||
+                        "Send failed";
+                      setToastMsg(details.slice(0, 300));
+                      setTimeout(() => setToastMsg(""), 2000);
+                    }
+                  }}
+                  className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-gray-700 hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-600"
+                >
+                  Send Imagesimage.png
+                </button>
+                <div className="text-sm text-gray-500 self-center">
+                  Saved endpoints are stored locally in your browser.
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Additional Dashboard Features */}
+          <div className="mt-6 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="bg-white overflow-hidden shadow rounded-lg">
+              <div className="p-5">
+                <div className="flex items-center">
+                  <div className="flex-shrink-0">
+                    <svg
+                      className="h-6 w-6 text-gray-400"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+                      />
+                    </svg>
+                  </div>
+                  <div className="ml-5 w-0 flex-1">
+                    <dl>
+                      <dt className="text-sm font-medium text-gray-500 truncate">
+                        Uploaded Images
+                      </dt>
+                      <dd className="text-lg font-medium text-gray-900">0</dd>
+                    </dl>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white overflow-hidden shadow rounded-lg">
+              <div className="p-5">
+                <div className="flex items-center">
+                  <div className="flex-shrink-0">
+                    <svg
+                      className="h-6 w-6 text-gray-400"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                      />
+                    </svg>
+                  </div>
+                  <div className="ml-5 w-0 flex-1">
+                    <dl>
+                      <dt className="text-sm font-medium text-gray-500 truncate">
+                        Reports Generated
+                      </dt>
+                      <dd className="text-lg font-medium text-gray-900">0</dd>
+                    </dl>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white overflow-hidden shadow rounded-lg">
+              <div className="p-5">
+                <div className="flex items-center">
+                  <div className="flex-shrink-0">
+                    <svg
+                      className="h-6 w-6 text-gray-400"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                      />
+                    </svg>
+                  </div>
+                  <div className="ml-5 w-0 flex-1">
+                    <dl>
+                      <dt className="text-sm font-medium text-gray-500 truncate">
+                        Last Activity
+                      </dt>
+                      <dd className="text-lg font-medium text-gray-900">
+                        Today
+                      </dd>
+                    </dl>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+}
