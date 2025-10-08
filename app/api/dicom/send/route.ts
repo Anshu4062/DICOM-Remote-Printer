@@ -1,12 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { spawn } from "child_process";
 import { join } from "path";
-import { existsSync } from "fs";
+import { existsSync, readdirSync } from "fs";
+import dbConnect from "@/lib/mongodb";
+import ImageHistory from "@/models/ImageHistory";
 
 export const runtime = "nodejs";
 
 export async function POST(req: NextRequest) {
   try {
+    await dbConnect();
+
     const { userId, callingAET, calledAET, host, port } = await req.json();
 
     if (!userId || !callingAET || !calledAET || !host || !port) {
@@ -20,6 +24,17 @@ export async function POST(req: NextRequest) {
     if (!existsSync(uploadDir)) {
       return NextResponse.json(
         { error: "No uploaded files found for this user" },
+        { status: 404 }
+      );
+    }
+
+    // Check if there are any files to send (allow extensionless and .dcm/.dicom)
+    const filesToSend = readdirSync(uploadDir).filter(
+      (f) => !f.endsWith(".tmp") && !f.endsWith(".part")
+    );
+    if (filesToSend.length === 0) {
+      return NextResponse.json(
+        { error: "No DICOM files found in your upload directory to send." },
         { status: 404 }
       );
     }
@@ -77,6 +92,20 @@ export async function POST(req: NextRequest) {
         { error: `storescu exited with code ${status}`, stdout, stderr },
         { status: 500 }
       );
+    }
+
+    // Save history entries for sent files
+    const endpoint = { callingAET, calledAET, host, port };
+    for (const filename of filesToSend) {
+      const historyEntry = new ImageHistory({
+        userId,
+        filename,
+        action: "sent",
+        metadata: {},
+        endpoint,
+        createdAt: new Date(),
+      });
+      await historyEntry.save();
     }
 
     return NextResponse.json({ status, stdout, stderr });

@@ -1,12 +1,50 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 
 interface User {
   id: string;
   name: string;
   email: string;
+}
+
+interface ImageMetadata {
+  patientName?: string;
+  patientId?: string;
+  patientSex?: string;
+  patientBirthDate?: string;
+  modality?: string;
+  studyDate?: string;
+  studyTime?: string;
+  studyDescription?: string;
+  seriesNumber?: string;
+  seriesDescription?: string;
+  bodyPartExamined?: string;
+  instanceNumber?: string;
+  rows?: string;
+  columns?: string;
+  manufacturer?: string;
+  manufacturerModelName?: string;
+  stationName?: string;
+  institutionName?: string;
+  institutionalDepartmentName?: string;
+  referringPhysicianName?: string;
+}
+
+interface HistoryEntry {
+  _id: string;
+  userId: string;
+  filename: string;
+  action: "uploaded" | "sent";
+  metadata: ImageMetadata;
+  endpoint?: {
+    callingAET: string;
+    calledAET: string;
+    host: string;
+    port: string;
+  };
+  createdAt: string;
 }
 
 export default function Dashboard() {
@@ -34,6 +72,16 @@ export default function Dashboard() {
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [toastMsg, setToastMsg] = useState("");
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const [imageMetadata, setImageMetadata] = useState<ImageMetadata | null>(
+    null
+  );
+  const [isMetaOpen, setIsMetaOpen] = useState(false);
+  const [loadingMetadata, setLoadingMetadata] = useState(false);
+  const [patientByFilename, setPatientByFilename] = useState<
+    Record<string, string>
+  >({});
   const router = useRouter();
 
   useEffect(() => {
@@ -65,6 +113,102 @@ export default function Dashboard() {
       }
     } catch {}
   }, []);
+
+  const loadHistory = useCallback(async () => {
+    if (!user?.id) return;
+    try {
+      const response = await fetch(`/api/history?userId=${user.id}`);
+      const data = await response.json();
+      if (data.success) {
+        setHistory(data.history);
+        // Seed any known patient names from stored metadata
+        const seeded: Record<string, string> = {};
+        for (const entry of data.history as HistoryEntry[]) {
+          const patientName = entry?.metadata?.patientName;
+          if (patientName) {
+            seeded[entry.filename] = patientName;
+          }
+        }
+        if (Object.keys(seeded).length) {
+          setPatientByFilename((prev) => ({ ...prev, ...seeded }));
+        }
+      }
+    } catch (error) {
+      console.error("Failed to load history:", error);
+    }
+  }, [user?.id]);
+
+  // Load image history on mount
+  useEffect(() => {
+    if (user?.id) {
+      loadHistory();
+    }
+  }, [user, loadHistory]);
+
+  const loadImageMetadata = async (filename: string) => {
+    if (!user?.id) return;
+    setLoadingMetadata(true);
+    try {
+      const response = await fetch("/api/dicom/metadata", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: user.id, filename }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        setImageMetadata(data.metadata);
+        setIsMetaOpen(true);
+        if (data.metadata?.patientName) {
+          setPatientByFilename((prev) => ({
+            ...prev,
+            [filename]: data.metadata.patientName as string,
+          }));
+        }
+      } else {
+        setImageMetadata(null);
+      }
+    } catch (error) {
+      console.error("Failed to load metadata:", error);
+      setImageMetadata(null);
+    } finally {
+      setLoadingMetadata(false);
+    }
+  };
+
+  // Fetch patient names in background for rows missing it
+  const fetchPatientNameSilently = useCallback(
+    async (filename: string) => {
+      if (!user?.id) return;
+      try {
+        const res = await fetch("/api/dicom/metadata", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: user.id, filename }),
+        });
+        const data = await res.json();
+        if (res.ok && data?.metadata?.patientName) {
+          setPatientByFilename((prev) => ({
+            ...prev,
+            [filename]: data.metadata.patientName as string,
+          }));
+        }
+      } catch (_) {
+        // ignore
+      }
+    },
+    [user?.id]
+  );
+
+  useEffect(() => {
+    if (!history.length) return;
+    const missing = history.filter(
+      (h) => !h.metadata?.patientName && !patientByFilename[h.filename]
+    );
+    const batch = missing.slice(0, 5);
+    if (batch.length) {
+      batch.forEach((h) => fetchPatientNameSilently(h.filename));
+    }
+  }, [history, patientByFilename, fetchPatientNameSilently]);
 
   // Close the profile dropdown on outside click
   useEffect(() => {
@@ -164,6 +308,7 @@ export default function Dashboard() {
 
       if (response.ok) {
         setUploadMessage("DICOM file uploaded successfully!");
+        loadHistory(); // Refresh history after upload
       } else {
         setUploadMessage(data.error || "Upload failed");
       }
@@ -198,12 +343,64 @@ export default function Dashboard() {
               </h1>
               <p className="text-gray-600">{user.email}</p>
             </div>
-            <button
-              onClick={handleLogout}
-              className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-md text-sm font-medium"
-            >
-              Logout
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => router.push("/receive")}
+                className="bg-gray-900 hover:bg-black text-white px-4 py-2 rounded-md text-sm font-medium"
+              >
+                Receive Images
+              </button>
+              <button
+                onClick={async () => {
+                  if (!user) return;
+                  // Start/stop toggle based on current status
+                  const statusRes = await fetch("/api/dicom/scp/status", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ userId: user.id }),
+                  });
+                  const status = await statusRes.json();
+                  if (!status.running) {
+                    const ae = callingAET || "RECEIVER";
+                    const port = Number(peerPort) || 11112;
+                    const res = await fetch("/api/dicom/scp/start", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        userId: user.id,
+                        aeTitle: ae,
+                        port,
+                      }),
+                    });
+                    const data = await res.json();
+                    if (res.ok) {
+                      setToastMsg(`Listening as ${data.ae} on :${data.port}`);
+                      setTimeout(() => setToastMsg(""), 1200);
+                    } else {
+                      setToastMsg(data.error || "Failed to start listener");
+                      setTimeout(() => setToastMsg(""), 1500);
+                    }
+                  } else {
+                    const res = await fetch("/api/dicom/scp/stop", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ userId: user.id }),
+                    });
+                    if (res.ok) {
+                      setToastMsg("Listener stopped");
+                      setTimeout(() => setToastMsg(""), 1000);
+                    }
+                  }
+                }}
+                className="hidden"
+              />
+              <button
+                onClick={handleLogout}
+                className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-md text-sm font-medium"
+              >
+                Logout
+              </button>
+            </div>
           </div>
         </div>
       </header>
@@ -488,6 +685,7 @@ export default function Dashboard() {
                     if (res.ok) {
                       setToastMsg("C-STORE sent");
                       setTimeout(() => setToastMsg(""), 1000);
+                      loadHistory(); // Refresh history after send
                     } else {
                       const details =
                         data.stderr ||
@@ -534,7 +732,9 @@ export default function Dashboard() {
                       <dt className="text-sm font-medium text-gray-500 truncate">
                         Uploaded Images
                       </dt>
-                      <dd className="text-lg font-medium text-gray-900">0</dd>
+                      <dd className="text-lg font-medium text-gray-900">
+                        {history.filter((h) => h.action === "uploaded").length}
+                      </dd>
                     </dl>
                   </div>
                 </div>
@@ -564,7 +764,9 @@ export default function Dashboard() {
                       <dt className="text-sm font-medium text-gray-500 truncate">
                         Reports Generated
                       </dt>
-                      <dd className="text-lg font-medium text-gray-900">0</dd>
+                      <dd className="text-lg font-medium text-gray-900">
+                        {history.filter((h) => h.action === "sent").length}
+                      </dd>
                     </dl>
                   </div>
                 </div>
@@ -601,6 +803,314 @@ export default function Dashboard() {
                   </div>
                 </div>
               </div>
+            </div>
+          </div>
+
+          {/* Image Metadata Modal */}
+          {selectedImage && (
+            <div className={`fixed inset-0 z-50 ${isMetaOpen ? "" : "hidden"}`}>
+              <div
+                className="absolute inset-0 bg-black/50"
+                onClick={() => setIsMetaOpen(false)}
+              />
+              <div className="relative max-w-5xl mx-auto mt-10 bg-white rounded-lg shadow-xl p-6 max-h-[80vh] overflow-auto">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-medium text-gray-900">
+                    DICOM Metadata - {selectedImage}
+                  </h2>
+                  <button
+                    onClick={() => setIsMetaOpen(false)}
+                    className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300"
+                  >
+                    Close
+                  </button>
+                </div>
+                {loadingMetadata ? (
+                  <div className="text-center py-4 text-gray-500">
+                    Loading metadata...
+                  </div>
+                ) : imageMetadata ? (
+                  <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+                    {/* Patient Information */}
+                    <div className="bg-gray-50 rounded-lg p-4">
+                      <h3 className="text-sm font-medium text-gray-900 mb-3">
+                        Patient Information
+                      </h3>
+                      <div className="space-y-2 text-sm">
+                        {imageMetadata.patientName && (
+                          <div>
+                            <span className="font-medium">Name:</span>{" "}
+                            {imageMetadata.patientName}
+                          </div>
+                        )}
+                        {imageMetadata.patientId && (
+                          <div>
+                            <span className="font-medium">ID:</span>{" "}
+                            {imageMetadata.patientId}
+                          </div>
+                        )}
+                        {imageMetadata.patientSex && (
+                          <div>
+                            <span className="font-medium">Sex:</span>{" "}
+                            {imageMetadata.patientSex}
+                          </div>
+                        )}
+                        {imageMetadata.patientBirthDate && (
+                          <div>
+                            <span className="font-medium">Birth Date:</span>{" "}
+                            {imageMetadata.patientBirthDate}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    {/* Study Information */}
+                    <div className="bg-gray-50 rounded-lg p-4">
+                      <h3 className="text-sm font-medium text-gray-900 mb-3">
+                        Study Information
+                      </h3>
+                      <div className="space-y-2 text-sm">
+                        {imageMetadata.studyDate && (
+                          <div>
+                            <span className="font-medium">Date:</span>{" "}
+                            {imageMetadata.studyDate}
+                          </div>
+                        )}
+                        {imageMetadata.studyTime && (
+                          <div>
+                            <span className="font-medium">Time:</span>{" "}
+                            {imageMetadata.studyTime}
+                          </div>
+                        )}
+                        {imageMetadata.studyDescription && (
+                          <div>
+                            <span className="font-medium">Description:</span>{" "}
+                            {imageMetadata.studyDescription}
+                          </div>
+                        )}
+                        {imageMetadata.modality && (
+                          <div>
+                            <span className="font-medium">Modality:</span>{" "}
+                            {imageMetadata.modality}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    {/* Series Information */}
+                    <div className="bg-gray-50 rounded-lg p-4">
+                      <h3 className="text-sm font-medium text-gray-900 mb-3">
+                        Series Information
+                      </h3>
+                      <div className="space-y-2 text-sm">
+                        {imageMetadata.seriesNumber && (
+                          <div>
+                            <span className="font-medium">Number:</span>{" "}
+                            {imageMetadata.seriesNumber}
+                          </div>
+                        )}
+                        {imageMetadata.seriesDescription && (
+                          <div>
+                            <span className="font-medium">Description:</span>{" "}
+                            {imageMetadata.seriesDescription}
+                          </div>
+                        )}
+                        {imageMetadata.bodyPartExamined && (
+                          <div>
+                            <span className="font-medium">Body Part:</span>{" "}
+                            {imageMetadata.bodyPartExamined}
+                          </div>
+                        )}
+                        {imageMetadata.instanceNumber && (
+                          <div>
+                            <span className="font-medium">Instance:</span>{" "}
+                            {imageMetadata.instanceNumber}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    {/* Technical Information */}
+                    <div className="bg-gray-50 rounded-lg p-4">
+                      <h3 className="text-sm font-medium text-gray-900 mb-3">
+                        Technical Information
+                      </h3>
+                      <div className="space-y-2 text-sm">
+                        {imageMetadata.rows && (
+                          <div>
+                            <span className="font-medium">Rows:</span>{" "}
+                            {imageMetadata.rows}
+                          </div>
+                        )}
+                        {imageMetadata.columns && (
+                          <div>
+                            <span className="font-medium">Columns:</span>{" "}
+                            {imageMetadata.columns}
+                          </div>
+                        )}
+                        {imageMetadata.manufacturer && (
+                          <div>
+                            <span className="font-medium">Manufacturer:</span>{" "}
+                            {imageMetadata.manufacturer}
+                          </div>
+                        )}
+                        {imageMetadata.manufacturerModelName && (
+                          <div>
+                            <span className="font-medium">Model:</span>{" "}
+                            {imageMetadata.manufacturerModelName}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    {/* Institution Information */}
+                    <div className="bg-gray-50 rounded-lg p-4">
+                      <h3 className="text-sm font-medium text-gray-900 mb-3">
+                        Institution Information
+                      </h3>
+                      <div className="space-y-2 text-sm">
+                        {imageMetadata.stationName && (
+                          <div>
+                            <span className="font-medium">Station:</span>{" "}
+                            {imageMetadata.stationName}
+                          </div>
+                        )}
+                        {imageMetadata.institutionName && (
+                          <div>
+                            <span className="font-medium">Institution:</span>{" "}
+                            {imageMetadata.institutionName}
+                          </div>
+                        )}
+                        {imageMetadata.institutionalDepartmentName && (
+                          <div>
+                            <span className="font-medium">Department:</span>{" "}
+                            {imageMetadata.institutionalDepartmentName}
+                          </div>
+                        )}
+                        {imageMetadata.referringPhysicianName && (
+                          <div>
+                            <span className="font-medium">Physician:</span>{" "}
+                            {imageMetadata.referringPhysicianName}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-center py-4 text-gray-500">
+                    No metadata available for this image
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Image History */}
+          <div className="mt-6 bg-white overflow-hidden shadow rounded-lg">
+            <div className="px-4 py-5 sm:p-6">
+              <h2 className="text-lg font-medium text-gray-900 mb-4">
+                Image History
+              </h2>
+              {user && (
+                <div className="mb-3 text-sm text-gray-600">
+                  <span className="font-medium">
+                    Your AE/Port for receiving:
+                  </span>{" "}
+                  <span className="text-gray-900">
+                    {callingAET || "RECEIVER"}
+                  </span>{" "}
+                  on port{" "}
+                  <span className="text-gray-900">
+                    {Number(peerPort) || 11112}
+                  </span>
+                </div>
+              )}
+
+              {history.length === 0 ? (
+                <div className="text-center py-8 text-gray-500">
+                  No image history available
+                </div>
+              ) : (
+                <div>
+                  <table className="w-full divide-y divide-gray-200 text-sm">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Action
+                        </th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Filename
+                        </th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Patient
+                        </th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Date/Time
+                        </th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider hidden md:table-cell">
+                          Endpoint
+                        </th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Actions
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {history.map((entry) => (
+                        <tr key={entry._id} className="hover:bg-gray-50">
+                          <td className="px-3 py-2 whitespace-nowrap">
+                            <span
+                              className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                                entry.action === "uploaded"
+                                  ? "bg-blue-100 text-blue-800"
+                                  : "bg-green-100 text-green-800"
+                              }`}
+                            >
+                              {entry.action === "uploaded"
+                                ? "Uploaded"
+                                : "Sent"}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 whitespace-nowrap text-gray-900 truncate max-w-[22rem]">
+                            {entry.filename}
+                          </td>
+                          <td className="px-3 py-2 whitespace-nowrap text-gray-900">
+                            {patientByFilename[entry.filename] ||
+                              entry.metadata?.patientName ||
+                              "-"}
+                          </td>
+                          <td className="px-3 py-2 whitespace-nowrap text-gray-500">
+                            {new Date(entry.createdAt).toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 whitespace-nowrap text-gray-500 hidden md:table-cell">
+                            {entry.endpoint ? (
+                              <div>
+                                <div>
+                                  {entry.endpoint.calledAET} @{" "}
+                                  {entry.endpoint.host}:{entry.endpoint.port}
+                                </div>
+                                <div className="text-xs text-gray-400">
+                                  From: {entry.endpoint.callingAET}
+                                </div>
+                              </div>
+                            ) : (
+                              "-"
+                            )}
+                          </td>
+                          <td className="px-3 py-2 whitespace-nowrap font-medium">
+                            <button
+                              onClick={() => {
+                                setSelectedImage(entry.filename);
+                                setIsMetaOpen(true);
+                                loadImageMetadata(entry.filename);
+                              }}
+                              className="inline-flex items-center px-2 py-1 rounded bg-blue-600 text-white text-xs hover:bg-blue-700"
+                            >
+                              View Metadata
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           </div>
         </div>
