@@ -19,34 +19,6 @@ export default function Receive() {
   const [metadata, setMetadata] = useState<any>(null);
   const [knownFiles, setKnownFiles] = useState<Set<string>>(new Set());
   const [history, setHistory] = useState<any[]>([]);
-  const formatMeta = (m: any) => {
-    if (!m) return [] as Array<{ k: string; v: string }>;
-    const keys = [
-      ["patientName", "Patient"],
-      ["patientId", "Patient ID"],
-      ["patientSex", "Sex"],
-      ["patientBirthDate", "DOB"],
-      ["modality", "Modality"],
-      ["studyDate", "Study Date"],
-      ["studyTime", "Study Time"],
-      ["studyDescription", "Study Description"],
-      ["seriesNumber", "Series #"],
-      ["seriesDescription", "Series"],
-      ["bodyPartExamined", "Body Part"],
-      ["instanceNumber", "Instance #"],
-      ["rows", "Rows"],
-      ["columns", "Columns"],
-      ["manufacturer", "Manufacturer"],
-      ["manufacturerModelName", "Model"],
-      ["stationName", "Station"],
-      ["institutionName", "Institution"],
-      ["institutionalDepartmentName", "Department"],
-      ["referringPhysicianName", "Referring Physician"],
-    ] as Array<[string, string]>;
-    return keys
-      .map(([k, label]) => ({ k: label, v: m?.[k] }))
-      .filter((p) => !!p.v);
-  };
   const [callingAET, setCallingAET] = useState("RECEIVER");
   const [port, setPort] = useState("11112");
   const router = useRouter();
@@ -374,9 +346,11 @@ export default function Receive() {
       {/* Centered metadata modal */}
       {metadata && selectedFile && (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[80vh] overflow-auto">
+          <div className="bg-white rounded-lg shadow-xl max-w-5xl w-full max-h-[80vh] overflow-auto">
             <div className="flex items-center justify-between border-b p-4">
-              <div className="font-semibold">Metadata - {selectedFile}</div>
+              <div className="font-semibold">
+                DICOM Metadata - {selectedFile}
+              </div>
               <button
                 onClick={() => setMetadata(null)}
                 className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300"
@@ -384,15 +358,232 @@ export default function Receive() {
                 Close
               </button>
             </div>
-            <div className="p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-sm">
-              {formatMeta(metadata).map((p) => (
-                <div key={p.k} className="rounded border p-2 bg-gray-50">
-                  <div className="text-gray-500">{p.k}</div>
-                  <div className="font-medium text-gray-900 break-words">
-                    {p.v}
+            <div className="p-4">
+              {/* Show error message if metadata has error */}
+              {metadata.error ? (
+                <div className="text-center py-4 text-red-600 bg-red-50 rounded-lg">
+                  <div className="font-medium">Error loading metadata:</div>
+                  <div className="text-sm mt-1">{metadata.error}</div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+                  {/* ZIP File Information */}
+                  {metadata.zipFile && (
+                    <div className="bg-blue-50 rounded-lg p-4 col-span-full">
+                      <h3 className="text-sm font-medium text-blue-900 mb-3">
+                        ZIP File Information
+                      </h3>
+                      <div className="space-y-2 text-sm">
+                        <div>
+                          <span className="font-medium">ZIP File:</span>{" "}
+                          {metadata.zipFile}
+                        </div>
+                        {metadata.extractedFrom && (
+                          <div>
+                            <span className="font-medium">Extracted from:</span>{" "}
+                            {metadata.extractedFrom}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Patient Information */}
+                  <div className="bg-gray-50 rounded-lg p-4">
+                    <h3 className="text-sm font-medium text-gray-900 mb-3">
+                      Patient Information
+                    </h3>
+                    <div className="space-y-2 text-sm">
+                      {metadata.patientName && (
+                        <div>
+                          <span className="font-medium">Name:</span>{" "}
+                          {metadata.patientName}
+                        </div>
+                      )}
+                      {metadata.patientId && (
+                        <div>
+                          <span className="font-medium">ID:</span>{" "}
+                          {metadata.patientId}
+                        </div>
+                      )}
+                      {metadata.patientSex && (
+                        <div>
+                          <span className="font-medium">Sex:</span>{" "}
+                          {metadata.patientSex}
+                        </div>
+                      )}
+                      {metadata.patientBirthDate && (
+                        <div>
+                          <span className="font-medium">Birth Date:</span>{" "}
+                          {metadata.patientBirthDate}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Study Information */}
+                  <div className="bg-gray-50 rounded-lg p-4">
+                    <h3 className="text-sm font-medium text-gray-900 mb-3">
+                      Study Information
+                    </h3>
+                    <div className="space-y-2 text-sm">
+                      {metadata.studyDate && (
+                        <div>
+                          <span className="font-medium">Date:</span>{" "}
+                          {metadata.studyDate}
+                        </div>
+                      )}
+                      {metadata.studyTime && (
+                        <div>
+                          <span className="font-medium">Time:</span>{" "}
+                          {metadata.studyTime}
+                        </div>
+                      )}
+                      {metadata.studyDescription && (
+                        <div>
+                          <span className="font-medium">Description:</span>{" "}
+                          {metadata.studyDescription}
+                        </div>
+                      )}
+                      {metadata.studyInstanceUID && (
+                        <div>
+                          <span className="font-medium">Study UID:</span>{" "}
+                          <span className="text-xs text-gray-600 break-all">
+                            {metadata.studyInstanceUID}
+                          </span>
+                        </div>
+                      )}
+                      {metadata.accessionNumber && (
+                        <div>
+                          <span className="font-medium">Accession:</span>{" "}
+                          {metadata.accessionNumber}
+                        </div>
+                      )}
+                      {metadata.modality && (
+                        <div>
+                          <span className="font-medium">Modality:</span>{" "}
+                          {metadata.modality}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Series Information */}
+                  <div className="bg-gray-50 rounded-lg p-4">
+                    <h3 className="text-sm font-medium text-gray-900 mb-3">
+                      Series Information
+                    </h3>
+                    <div className="space-y-2 text-sm">
+                      {metadata.seriesNumber && (
+                        <div>
+                          <span className="font-medium">Number:</span>{" "}
+                          {metadata.seriesNumber}
+                        </div>
+                      )}
+                      {metadata.seriesDescription && (
+                        <div>
+                          <span className="font-medium">Description:</span>{" "}
+                          {metadata.seriesDescription}
+                        </div>
+                      )}
+                      {metadata.seriesInstanceUID && (
+                        <div>
+                          <span className="font-medium">Series UID:</span>{" "}
+                          <span className="text-xs text-gray-600 break-all">
+                            {metadata.seriesInstanceUID}
+                          </span>
+                        </div>
+                      )}
+                      {metadata.bodyPartExamined && (
+                        <div>
+                          <span className="font-medium">Body Part:</span>{" "}
+                          {metadata.bodyPartExamined}
+                        </div>
+                      )}
+                      {metadata.instanceNumber && (
+                        <div>
+                          <span className="font-medium">Instance:</span>{" "}
+                          {metadata.instanceNumber}
+                        </div>
+                      )}
+                      {metadata.sopInstanceUID && (
+                        <div>
+                          <span className="font-medium">SOP UID:</span>{" "}
+                          <span className="text-xs text-gray-600 break-all">
+                            {metadata.sopInstanceUID}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Technical Information */}
+                  <div className="bg-gray-50 rounded-lg p-4">
+                    <h3 className="text-sm font-medium text-gray-900 mb-3">
+                      Technical Information
+                    </h3>
+                    <div className="space-y-2 text-sm">
+                      {metadata.rows && (
+                        <div>
+                          <span className="font-medium">Rows:</span>{" "}
+                          {metadata.rows}
+                        </div>
+                      )}
+                      {metadata.columns && (
+                        <div>
+                          <span className="font-medium">Columns:</span>{" "}
+                          {metadata.columns}
+                        </div>
+                      )}
+                      {metadata.manufacturer && (
+                        <div>
+                          <span className="font-medium">Manufacturer:</span>{" "}
+                          {metadata.manufacturer}
+                        </div>
+                      )}
+                      {metadata.manufacturerModelName && (
+                        <div>
+                          <span className="font-medium">Model:</span>{" "}
+                          {metadata.manufacturerModelName}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Institution Information */}
+                  <div className="bg-gray-50 rounded-lg p-4">
+                    <h3 className="text-sm font-medium text-gray-900 mb-3">
+                      Institution Information
+                    </h3>
+                    <div className="space-y-2 text-sm">
+                      {metadata.institutionName && (
+                        <div>
+                          <span className="font-medium">Institution:</span>{" "}
+                          {metadata.institutionName}
+                        </div>
+                      )}
+                      {metadata.stationName && (
+                        <div>
+                          <span className="font-medium">Station:</span>{" "}
+                          {metadata.stationName}
+                        </div>
+                      )}
+                      {metadata.institutionalDepartmentName && (
+                        <div>
+                          <span className="font-medium">Department:</span>{" "}
+                          {metadata.institutionalDepartmentName}
+                        </div>
+                      )}
+                      {metadata.referringPhysicianName && (
+                        <div>
+                          <span className="font-medium">Physician:</span>{" "}
+                          {metadata.referringPhysicianName}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
-              ))}
+              )}
             </div>
           </div>
         </div>

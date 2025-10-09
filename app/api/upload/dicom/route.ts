@@ -5,6 +5,8 @@ import { existsSync } from "fs";
 import JSZip from "jszip";
 import dbConnect from "@/lib/mongodb";
 import ImageHistory from "@/models/ImageHistory";
+import { exec } from "child_process";
+import { promisify } from "util";
 
 // Ensure Node.js runtime for fs and JSZip
 export const runtime = "nodejs";
@@ -46,6 +48,46 @@ export async function POST(request: NextRequest) {
 
     const ext = extname(file.name).toLowerCase();
 
+    const execAsync = promisify(exec);
+
+    const parseKeyFields = (stdout: string) => {
+      const pickFirstNonEmpty = (tag: string) => {
+        // Find the first occurrence of this tag that actually has a value in [..]
+        const re = new RegExp(
+          `\\(${tag}\\)\\s+\\w+\\s+(?:\\[([^\\]]+)\\]|\\(no value available\\))`,
+          "ig"
+        );
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(stdout)) !== null) {
+          if (m[1] && m[1].trim()) return m[1].trim();
+        }
+        return undefined;
+      };
+      const pickAny = (tags: string[]) => {
+        for (const t of tags) {
+          const v = pickFirstNonEmpty(t);
+          if (v !== undefined) return v;
+        }
+        return undefined;
+      };
+      return {
+        patientName: pickFirstNonEmpty("0010,0010"),
+        patientId: pickFirstNonEmpty("0010,0020"),
+        patientSex: pickFirstNonEmpty("0010,0040"),
+        patientBirthDate: pickFirstNonEmpty("0010,0030"),
+        modality: pickFirstNonEmpty("0008,0060"),
+        studyDescription: pickFirstNonEmpty("0008,1030"),
+        institutionName: pickAny(["0008,0080", "0008,1040"]),
+        stationName: pickFirstNonEmpty("0008,1010"),
+        studyInstanceUID: pickFirstNonEmpty("0020,000d"),
+        seriesInstanceUID: pickFirstNonEmpty("0020,000e"),
+        sopInstanceUID: pickFirstNonEmpty("0008,0018"),
+        studyId: pickFirstNonEmpty("0020,0010"),
+        accessionNumber: pickFirstNonEmpty("0008,0050"),
+        referringPhysicianName: pickFirstNonEmpty("0008,0090"),
+      } as any;
+    };
+
     // Case 1: ZIP archive containing one or more DICOM files
     if (ext === ".zip" || file.type === "application/zip") {
       const zip = await JSZip.loadAsync(buffer);
@@ -71,22 +113,120 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      // Save a single grouped history entry for the ZIP
+      // Also save the original ZIP file
+      const zipFilename = `${Date.now()}_${file.name || "upload.zip"}`;
+      const zipFilepath = join(uploadsDir, zipFilename);
+      await writeFile(zipFilepath, buffer);
+
+      // Try to extract key metadata from the DICOMs for caching and default history display
+      // Strategy: iterate all saved files in the ZIP, parse, and merge preferring defined values
+      let keyMeta: any = {};
+      const prefer = (current: any, incoming: any) => {
+        const out: any = { ...current };
+        const fields = [
+          "patientName",
+          "patientId",
+          "patientSex",
+          "patientBirthDate",
+          "modality",
+          "studyDescription",
+          "institutionName",
+          "stationName",
+          "studyInstanceUID",
+          "seriesInstanceUID",
+          "studyId",
+          "accessionNumber",
+          "referringPhysicianName",
+        ];
+        for (const f of fields) {
+          if (out[f] === undefined || out[f] === "-") {
+            if (incoming && incoming[f] !== undefined && incoming[f] !== "-") {
+              out[f] = incoming[f];
+            }
+          }
+        }
+        return out;
+      };
+      let duplicateFound = false;
+      try {
+        if (savedFiles.length > 0) {
+          const cacheDir = join(uploadsDir, "_meta");
+          if (!existsSync(cacheDir)) await mkdir(cacheDir, { recursive: true });
+          for (const f of savedFiles) {
+            try {
+              const p = join(uploadsDir, f);
+              console.log(`Running dcmdump on: ${p}`);
+              const { stdout } = await execAsync(`dcmdump "${p}"`);
+              const parsed = parseKeyFields(stdout);
+              keyMeta = prefer(keyMeta, parsed);
+              // Duplicate check using SOP Instance UID if available
+              if (parsed?.sopInstanceUID) {
+                const exists = await ImageHistory.findOne({
+                  userId,
+                  "metadata.sopInstanceUID": parsed.sopInstanceUID,
+                });
+                if (exists) duplicateFound = true;
+              }
+              // cache JSON for each dicom so later requests are instant
+              await writeFile(
+                join(cacheDir, `${f}.json`),
+                Buffer.from(JSON.stringify(parsed, null, 2))
+              );
+              console.log(`Cached metadata for: ${f}`);
+            } catch (e) {
+              console.error(
+                `Failed to parse/cache ${f}:`,
+                (e as any)?.message || e
+              );
+            }
+          }
+        }
+      } catch (metaError) {
+        console.error("Metadata extraction error:", metaError);
+      }
+
+      if (duplicateFound) {
+        return NextResponse.json(
+          { duplicate: true, message: "Image already exists" },
+          { status: 409 }
+        );
+      }
+
+      // Save a single grouped history entry for the ZIP, include key metadata
       const historyEntry = new ImageHistory({
         userId,
-        filename: file.name || "upload.zip",
+        filename: zipFilename,
         action: "uploaded",
         metadata: {
           zip: true,
           fileCount: savedFiles.length,
           files: savedFiles,
+          ...keyMeta,
         },
         createdAt: new Date(),
       });
       await historyEntry.save();
 
+      // Also write a cache JSON under the ZIP filename for stable lookup in history
+      try {
+        const cacheDir = join(uploadsDir, "_meta");
+        if (!existsSync(cacheDir)) await mkdir(cacheDir, { recursive: true });
+        await writeFile(
+          join(cacheDir, `${zipFilename}.json`),
+          Buffer.from(JSON.stringify(keyMeta, null, 2))
+        );
+        console.log(`Cached metadata for ZIP: ${zipFilename}`);
+      } catch (zipCacheError) {
+        console.error("ZIP cache write error:", zipCacheError);
+      }
+
       return NextResponse.json(
-        { message: "ZIP processed", files: savedFiles },
+        {
+          message: "ZIP processed",
+          files: savedFiles,
+          zipFile: zipFilename,
+          metadata: keyMeta,
+        },
         { status: 200 }
       );
     }
@@ -108,12 +248,49 @@ export async function POST(request: NextRequest) {
     const filepath = join(uploadsDir, filename);
     await writeFile(filepath, buffer);
 
-    // Save history entry for uploaded file
+    // Extract key metadata and cache immediately
+    let keyMeta: any = {};
+    try {
+      console.log(`Running dcmdump on: ${filepath}`);
+      const { stdout } = await execAsync(`dcmdump "${filepath}"`);
+      keyMeta = parseKeyFields(stdout);
+      console.log(`Extracted metadata:`, keyMeta);
+
+      // Duplicate check by SOP Instance UID if available
+      if (keyMeta?.sopInstanceUID) {
+        const exists = await ImageHistory.findOne({
+          userId,
+          "metadata.sopInstanceUID": keyMeta.sopInstanceUID,
+        });
+        if (exists) {
+          return NextResponse.json(
+            { duplicate: true, message: "Image already exists" },
+            { status: 409 }
+          );
+        }
+      }
+
+      try {
+        const cacheDir = join(uploadsDir, "_meta");
+        if (!existsSync(cacheDir)) await mkdir(cacheDir, { recursive: true });
+        await writeFile(
+          join(cacheDir, `${filename}.json`),
+          Buffer.from(JSON.stringify(keyMeta, null, 2))
+        );
+        console.log(`Cached metadata for: ${filename}`);
+      } catch (cacheError) {
+        console.error("Cache write error:", cacheError);
+      }
+    } catch (metaError) {
+      console.error("Metadata extraction error:", metaError);
+    }
+
+    // Save history entry for uploaded file with key metadata
     const historyEntry = new ImageHistory({
       userId,
       filename,
       action: "uploaded",
-      metadata: {},
+      metadata: { ...keyMeta },
       createdAt: new Date(),
     });
     await historyEntry.save();
@@ -125,6 +302,7 @@ export async function POST(request: NextRequest) {
         filepath: filepath,
         size: file.size,
         type: file.type,
+        metadata: keyMeta,
       },
       { status: 200 }
     );

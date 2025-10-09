@@ -4,6 +4,7 @@ export interface IUser extends Document {
   name: string;
   email: string;
   password: string;
+  role: "user" | "admin";
   createdAt: Date;
   updatedAt: Date;
 }
@@ -22,15 +23,24 @@ const UserSchema: Schema = new Schema(
       unique: true,
       lowercase: true,
       trim: true,
-      match: [
-        /^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/,
-        "Please enter a valid email",
-      ],
+      validate: {
+        validator: function (v: string) {
+          if (v === "admin") return true; // reserved admin username allowed
+          return /^(?:[A-Z0-9._%+-]+)@(?:[A-Z0-9-]+\.)+[A-Z]{2,}$/i.test(v);
+        },
+        message: "Please enter a valid email",
+      },
     },
     password: {
       type: String,
       required: [true, "Password is required"],
       minLength: [6, "Password must be at least 6 characters"],
+    },
+    role: {
+      type: String,
+      enum: ["user", "admin"],
+      default: "user",
+      index: true,
     },
   },
   {

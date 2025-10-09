@@ -41,8 +41,12 @@ export default function Login() {
           // Safety net: also set a non-HttpOnly cookie for middleware to read if needed
           document.cookie = `token=${data.token}; Path=/; SameSite=Lax`;
         } catch {}
-        // Hard redirect to guarantee navigation
-        window.location.href = "/dashboard";
+        // Redirect admin directly to /admin
+        if (data?.user?.role === "admin" || data?.admin) {
+          window.location.href = "/admin";
+        } else {
+          window.location.href = "/dashboard";
+        }
       } else {
         setError(data.error);
       }
@@ -75,16 +79,16 @@ export default function Login() {
           <div className="rounded-md shadow-sm -space-y-px">
             <div>
               <label htmlFor="email" className="sr-only">
-                Email address
+                Email or username
               </label>
               <input
                 id="email"
                 name="email"
-                type="email"
-                autoComplete="email"
+                type="text"
+                autoComplete="username"
                 required
                 className="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-t-md focus:outline-none focus:ring-primary-500 focus:border-primary-500 focus:z-10 sm:text-sm"
-                placeholder="Email address"
+                placeholder="Email or username"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
               />

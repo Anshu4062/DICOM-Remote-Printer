@@ -52,10 +52,19 @@ export async function POST(request: NextRequest) {
     console.log("[REGISTER] Password hashed");
 
     // Create user
+    // Prevent users from registering the reserved admin username
+    if (email?.toLowerCase() === "admin") {
+      return NextResponse.json(
+        { error: "'admin' is a reserved username" },
+        { status: 400 }
+      );
+    }
     const user = await User.create({
       name,
       email,
       password: hashedPassword,
+      // All registered users are standard users; admin is provisioned by login bootstrap
+      role: "user",
     });
     console.log("[REGISTER] User created", { userId: user._id });
 
@@ -75,6 +84,7 @@ export async function POST(request: NextRequest) {
           id: user._id,
           name: user.name,
           email: user.email,
+          role: user.role,
         },
       },
       { status: 201 }
