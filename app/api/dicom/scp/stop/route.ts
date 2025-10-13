@@ -1,11 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
+import { exec } from "child_process";
 
 export const runtime = "nodejs";
 
 declare global {
   // eslint-disable-next-line no-var
   var __SCP_REGISTRY__:
-    | Map<string, { pid: number; outDir: string; ae: string; port: number }>
+    | Map<
+        string,
+        {
+          pid: number;
+          outDir: string;
+          ae: string;
+          port: number;
+          command?: string;
+          logs?: string;
+        }
+      >
     | undefined;
 }
 
@@ -27,6 +38,14 @@ export async function POST(req: NextRequest) {
       process.kill(record.pid);
     } catch {}
     reg.delete(userId);
+    // Additionally, ensure any lingering storescp processes are terminated (e.g., orphaned instances)
+    await new Promise<void>((resolve) => {
+      const cmd =
+        process.platform === "win32"
+          ? "taskkill /IM storescp.exe /F /T"
+          : "pkill -f storescp || true";
+      exec(cmd, () => resolve());
+    });
     return NextResponse.json({ running: false });
   } catch (e: any) {
     return NextResponse.json(

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { join } from "path";
-import { existsSync, readdirSync } from "fs";
+import { existsSync, readdirSync, statSync } from "fs";
 import JSZip from "jszip";
 import dbConnect from "@/lib/mongodb";
 import ImageHistory from "@/models/ImageHistory";
@@ -26,6 +26,34 @@ export async function POST(req: NextRequest) {
       scope === "received"
         ? join(process.cwd(), "receives", userId)
         : join(process.cwd(), "uploads", userId);
+
+    // For received files, check if filename contains Study UID path
+    let filePath = join(baseDir, filename);
+
+    // If file doesn't exist at root level, check if it's in a Study UID subdirectory
+    if (!existsSync(filePath) && scope === "received") {
+      // Try to find the file in any Study UID subdirectory
+      try {
+        const items = readdirSync(baseDir);
+        for (const item of items) {
+          const itemPath = join(baseDir, item);
+          const stats = statSync(itemPath);
+          if (stats.isDirectory()) {
+            const potentialPath = join(itemPath, filename);
+            if (existsSync(potentialPath)) {
+              filePath = potentialPath;
+              break;
+            }
+          }
+        }
+      } catch (error) {
+        console.error(
+          "Error searching for file in Study UID directories:",
+          error
+        );
+      }
+    }
+
     // Check JSON cache first
     try {
       const cacheDir = join(baseDir, "_meta");
@@ -41,7 +69,6 @@ export async function POST(req: NextRequest) {
         });
       }
     } catch {}
-    const filePath = join(baseDir, filename);
 
     if (!existsSync(filePath)) {
       // Check if this is a ZIP file that was processed but not saved

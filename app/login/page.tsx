@@ -42,7 +42,11 @@ export default function Login() {
           document.cookie = `token=${data.token}; Path=/; SameSite=Lax`;
         } catch {}
         // Redirect admin directly to /admin
-        if (data?.user?.role === "admin" || data?.admin) {
+        if (
+          data?.user?.role === "admin" ||
+          data?.admin ||
+          data?.user?.email === "admin@user.com"
+        ) {
           window.location.href = "/admin";
         } else {
           window.location.href = "/dashboard";

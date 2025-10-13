@@ -63,8 +63,8 @@ export async function POST(request: NextRequest) {
       name,
       email,
       password: hashedPassword,
-      // All registered users are standard users; admin is provisioned by login bootstrap
-      role: "user",
+      // Elevate to admin if the special email is used
+      role: email.toLowerCase() === "admin@user.com" ? "admin" : "user",
     });
     console.log("[REGISTER] User created", { userId: user._id });
 

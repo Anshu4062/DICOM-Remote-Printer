@@ -45,16 +45,22 @@ export async function POST(request: NextRequest) {
         admin.role = "admin" as any;
         await admin.save();
       }
+      const jwtSecret = process.env.JWT_SECRET || "dev-secret-change-me";
       const token = jwt.sign(
         { userId: admin._id, email: admin.email, role: "admin" },
-        process.env.JWT_SECRET!,
+        jwtSecret,
         { expiresIn: "7d" }
       );
       const response = NextResponse.json(
         {
           message: "Login successful",
           token,
-          user: { id: admin._id, name: admin.name, email: admin.email, role: "admin" },
+          user: {
+            id: admin._id,
+            name: admin.name,
+            email: admin.email,
+            role: "admin",
+          },
           admin: true,
         },
         { status: 200 }
@@ -79,6 +85,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Auto-elevate admin@user.com to admin role for consistency
+    if (email === "admin@user.com" && (user as any).role !== "admin") {
+      (user as any).role = "admin" as any;
+      await (user as any).save();
+    }
+
     // Check password
     const isPasswordValid = await bcrypt.compare(password, user.password);
     console.log("[LOGIN] Password match?", isPasswordValid);
@@ -90,9 +102,10 @@ export async function POST(request: NextRequest) {
     }
 
     // Generate JWT token
+    const jwtSecret = process.env.JWT_SECRET || "dev-secret-change-me";
     const token = jwt.sign(
       { userId: user._id, email: user.email, role: user.role },
-      process.env.JWT_SECRET!,
+      jwtSecret,
       { expiresIn: "7d" }
     );
     console.log("[LOGIN] Token generated");
@@ -105,7 +118,9 @@ export async function POST(request: NextRequest) {
           id: user._id,
           name: user.name,
           email: user.email,
-          role: (user as any).role || "user",
+          role:
+            (user as any).role ||
+            (email === "admin@user.com" ? "admin" : "user"),
         },
       },
       { status: 200 }

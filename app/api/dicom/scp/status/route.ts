@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { join } from "path";
-import { existsSync, readdirSync } from "fs";
+import { existsSync, readdirSync, statSync } from "fs";
 
 export const runtime = "nodejs";
 
@@ -37,11 +37,30 @@ export async function POST(req: NextRequest) {
     let files: string[] = [];
     let outDir = record?.outDir || join(process.cwd(), "receives", userId);
     if (existsSync(outDir)) {
-      // DCMTK storescp often writes files without an extension (e.g., DX..., PDF...)
-      // Show all files, excluding obvious temp fragments
-      files = readdirSync(outDir).filter(
-        (f) => !f.endsWith(".tmp") && !f.endsWith(".part")
-      );
+      // Collect files from main directory and Study UID subdirectories
+      const collectFiles = (dir: string, prefix = ""): string[] => {
+        const result: string[] = [];
+        try {
+          const items = readdirSync(dir);
+          for (const item of items) {
+            const itemPath = join(dir, item);
+            const stats = statSync(itemPath);
+
+            if (stats.isDirectory()) {
+              // Recursively collect files from subdirectories
+              result.push(...collectFiles(itemPath, prefix + item + "/"));
+            } else if (!item.endsWith(".tmp") && !item.endsWith(".part")) {
+              // Add file with its path prefix
+              result.push(prefix + item);
+            }
+          }
+        } catch (error) {
+          console.error(`Error reading directory ${dir}:`, error);
+        }
+        return result;
+      };
+
+      files = collectFiles(outDir);
     }
     return NextResponse.json({
       running: !!record,

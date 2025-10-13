@@ -1,7 +1,17 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, {
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  useMemo,
+} from "react";
 import { useRouter } from "next/navigation";
+import {
+  applyAnonymization,
+  getUserAnonymizationSettings,
+} from "@/lib/anonymization";
 
 interface User {
   id: string;
@@ -97,6 +107,8 @@ interface ImageMetadata {
   // ZIP file specific fields
   zipFile?: string;
   extractedFrom?: string;
+  fileCount?: number;
+  files?: string[];
   error?: string;
 }
 
@@ -120,8 +132,14 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState("");
+  const [lastUploadedSummary, setLastUploadedSummary] = useState<{
+    name?: string;
+    study?: string;
+  } | null>(null);
+  const [historySearch, setHistorySearch] = useState("");
+  const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   // storescu UI state (client-only)
-  const [callingAET, setCallingAET] = useState("");
+  const [callingAET, setCallingAET] = useState("SENDER");
   const [calledAET, setCalledAET] = useState("");
   const [peerHost, setPeerHost] = useState("");
   const [peerPort, setPeerPort] = useState("");
@@ -138,6 +156,16 @@ export default function Dashboard() {
   const [selectedProfileId, setSelectedProfileId] = useState("");
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
+  const [assignedEndpoints, setAssignedEndpoints] = useState<
+    Array<{
+      _id: string;
+      name: string;
+      calledAET: string;
+      host: string;
+      port: string;
+    }>
+  >([]);
+  const [selectedEndpointId, setSelectedEndpointId] = useState<string>("");
   const fetchedMetaRef = useRef<Set<string>>(new Set());
   const [isSaving, setIsSaving] = useState(false);
   const [toastMsg, setToastMsg] = useState("");
@@ -154,6 +182,33 @@ export default function Dashboard() {
     filename: string;
   } | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [anonymizationSettings, setAnonymizationSettings] = useState<any>({});
+
+  // Sequential masked labels per file when any anonymization option (except Generate XML) is ON
+  const maskedNameByFilename = useMemo(() => {
+    const s = anonymizationSettings || {};
+    const anyMaskOn = !!(
+      s.anonymizeInstitutionName ||
+      s.anonymizeInstitutionAddress ||
+      s.anonymizePatientName ||
+      s.anonymizePatientId ||
+      s.anonymizeReferringPhysician ||
+      s.anonymizeAccessionNumber
+    );
+    const out: Record<string, string> = {};
+    if (!anyMaskOn) return out;
+    const base = (s.customPrefix || "***").trim() || "***";
+    const ordered = [...history].sort(
+      (a, b) =>
+        new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    );
+    let n = 0;
+    for (const h of ordered) {
+      n += 1;
+      out[h.filename] = n === 1 ? base : `${base}${n}`;
+    }
+    return out;
+  }, [history, anonymizationSettings]);
 
   const extractKeyFieldsFromRaw = useCallback((raw: string) => {
     if (!raw) return {} as Partial<ImageMetadata>;
@@ -196,9 +251,22 @@ export default function Dashboard() {
           new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
       );
       const ref = items[0];
+      // Apply anonymization to metadata
+      const anonymizedMetadata = applyAnonymization(
+        ref.metadata,
+        anonymizationSettings
+      );
+      const seqName = maskedNameByFilename[ref.filename];
       const nameGuess =
-        patientByFilename[ref.filename] || ref.metadata?.patientName || "-";
-      const id = ref.metadata?.patientId || "";
+        seqName ||
+        patientByFilename[ref.filename] ||
+        anonymizedMetadata?.patientName ||
+        "-";
+      const id = anonymizationSettings?.anonymizePatientId
+        ? maskedNameByFilename[ref.filename] ||
+          anonymizedMetadata?.patientId ||
+          ""
+        : anonymizedMetadata?.patientId || "";
       return { key, items, displayName: nameGuess, displayId: id };
     });
     // Keep overall order by newest in each group
@@ -208,8 +276,19 @@ export default function Dashboard() {
       return bt - at;
     });
     return groupList;
-  }, [history, patientByFilename]);
+  }, [history, patientByFilename, anonymizationSettings]);
   const router = useRouter();
+
+  // Load anonymization settings for the current user
+  useEffect(() => {
+    const loadAnonymizationSettings = async () => {
+      if (user?.id) {
+        const settings = await getUserAnonymizationSettings(user.id);
+        setAnonymizationSettings(settings);
+      }
+    };
+    loadAnonymizationSettings();
+  }, [user?.id]);
 
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -221,7 +300,14 @@ export default function Dashboard() {
     }
 
     try {
-      setUser(JSON.parse(userData));
+      const parsed = JSON.parse(userData);
+      const url = new URL(window.location.href);
+      const allowAdmin = url.searchParams.get("allowAdmin");
+      if (parsed?.role === "admin" && !allowAdmin) {
+        router.push("/admin");
+        return;
+      }
+      setUser(parsed);
     } catch (error) {
       console.error("Error parsing user data:", error);
       router.push("/login");
@@ -297,6 +383,21 @@ export default function Dashboard() {
       loadHistory();
     }
   }, [user, loadHistory]);
+
+  // Load endpoints assigned by admin for this user
+  useEffect(() => {
+    const fetchAssigned = async () => {
+      if (!user?.id) return;
+      try {
+        const res = await fetch(`/api/admin/user-endpoints?userId=${user.id}`);
+        const data = await res.json();
+        if (res.ok && data?.success) {
+          setAssignedEndpoints(data.endpoints || []);
+        }
+      } catch {}
+    };
+    fetchAssigned();
+  }, [user?.id]);
 
   // Disable background metadata population to avoid flicker; server returns merged cache
   const loadAllMetadata = useCallback(async () => {
@@ -480,6 +581,11 @@ export default function Dashboard() {
 
       if (response.ok) {
         setUploadMessage("DICOM file uploaded successfully!");
+        const m = data?.metadata || {};
+        setLastUploadedSummary({
+          name: m.patientName,
+          study: m.studyInstanceUID,
+        });
         loadHistory(); // Refresh history after upload
       } else {
         setUploadMessage(data.error || "Upload failed");
@@ -490,6 +596,41 @@ export default function Dashboard() {
       setUploading(false);
     }
   };
+
+  const groupedByPatientStudy = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        patientName?: string;
+        patientId?: string;
+        studyInstanceUID?: string;
+        count: number;
+      }
+    >();
+    for (const h of history || []) {
+      const m: any = h?.metadata || {};
+      const patientKey = m.patientId || m.patientName || "";
+      const studyUID = m.studyInstanceUID || "";
+      if (!patientKey && !studyUID) continue;
+      const key = `${patientKey}::${studyUID}`;
+      const entry = map.get(key) || {
+        patientName: m.patientName,
+        patientId: m.patientId,
+        studyInstanceUID: studyUID,
+        count: 0,
+      };
+      // Count individual images inside zip files, not just the zip files themselves
+      const imageCount = m.fileCount || 1; // Use fileCount for zip files, default to 1 for single files
+      entry.count += imageCount;
+      if (!entry.patientName && m.patientName)
+        entry.patientName = m.patientName;
+      if (!entry.patientId && m.patientId) entry.patientId = m.patientId;
+      if (!entry.studyInstanceUID && studyUID)
+        entry.studyInstanceUID = studyUID;
+      map.set(key, entry);
+    }
+    return Array.from(map.values()).sort((a, b) => b.count - a.count);
+  }, [history]);
 
   if (loading) {
     return (
@@ -576,6 +717,59 @@ export default function Dashboard() {
           </div>
         </div>
 
+        {isGroupModalOpen && (
+          <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[80vh] overflow-auto">
+              <div className="flex items-center justify-between border-b p-4">
+                <div className="font-semibold">
+                  Image History (by Patient + Study)
+                </div>
+                <button
+                  onClick={() => setIsGroupModalOpen(false)}
+                  className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm"
+                >
+                  Close
+                </button>
+              </div>
+              <div className="p-4">
+                {!groupedByPatientStudy.length ? (
+                  <div className="text-sm text-gray-600">No history yet.</div>
+                ) : (
+                  <div className="space-y-3">
+                    {groupedByPatientStudy.map((g, idx) => (
+                      <div
+                        key={idx}
+                        className="flex items-start justify-between border rounded-md p-3"
+                      >
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-gray-900 truncate">
+                            {g.patientName || "-"}
+                            {g.patientId ? (
+                              <span className="text-gray-500 font-normal">
+                                {" "}
+                                • ID: {g.patientId}
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="mt-1 text-xs font-mono bg-blue-50 text-blue-800 border border-blue-200 rounded px-2 py-0.5 break-all inline-block">
+                            Study UID: {g.studyInstanceUID || "-"}
+                          </div>
+                          <div className="mt-1 text-xs text-gray-700">
+                            Total images: {g.count}
+                          </div>
+                        </div>
+                        <div className="text-right text-sm font-semibold text-gray-900">
+                          {g.count}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Delete Confirmation Modal - outside metadata modal so it shows in all contexts */}
         {deleteTarget && (
           <div className="fixed inset-0 z-50">
@@ -634,6 +828,20 @@ export default function Dashboard() {
                   {isDeleting ? "Deleting…" : "Delete"}
                 </button>
               </div>
+
+              {lastUploadedSummary && (
+                <div className="mt-3 text-sm text-gray-700">
+                  <span className="font-medium text-gray-900">
+                    Last upload:
+                  </span>{" "}
+                  {lastUploadedSummary.name || "-"}
+                  {lastUploadedSummary.study ? (
+                    <span className="ml-2 text-xs font-mono bg-blue-50 text-blue-800 border border-blue-200 rounded px-2 py-0.5">
+                      Study UID: {lastUploadedSummary.study}
+                    </span>
+                  ) : null}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -677,44 +885,117 @@ export default function Dashboard() {
                 Upload DICOM Images
               </h2>
 
-              <div className="group border-2 border-dashed border-gray-300 rounded-lg p-6 transition-colors duration-200 hover:border-primary-300">
-                <div className="text-center">
-                  <svg
-                    className="mx-auto h-12 w-12 text-gray-400 transition-colors duration-200 group-hover:text-primary-400"
-                    stroke="currentColor"
-                    fill="none"
-                    viewBox="0 0 48 48"
-                    aria-hidden="true"
+              {/* Toolbar: Upload | Endpoint | Send */}
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:gap-4">
+                <div>
+                  <input
+                    id="file-upload"
+                    name="file-upload"
+                    type="file"
+                    className="hidden"
+                    accept=".dcm,.dicom,.zip,application/zip,*/*"
+                    onChange={handleFileUpload}
+                    disabled={uploading}
+                  />
+                  <button
+                    onClick={() =>
+                      document.getElementById("file-upload")?.click()
+                    }
+                    disabled={uploading}
+                    className="inline-flex items-center gap-2 rounded-md bg-primary-600 px-4 py-2 text-white text-sm font-medium hover:bg-primary-700 disabled:opacity-50"
                   >
-                    <path
-                      d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02"
-                      strokeWidth={2}
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                  <div className="mt-4">
-                    <label
-                      htmlFor="file-upload"
-                      className="cursor-pointer bg-white rounded-md font-medium text-primary-600 hover:text-primary-700 transition-colors duration-150 focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-primary-500"
+                    {/* Upload SVG */}
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                      className="h-5 w-5"
                     >
-                      <span>Upload DICOM file</span>
-                      <input
-                        id="file-upload"
-                        name="file-upload"
-                        type="file"
-                        className="sr-only"
-                        accept=".dcm,.dicom,.zip,application/zip,*/*"
-                        onChange={handleFileUpload}
-                        disabled={uploading}
-                      />
-                    </label>
-                    <p className="pl-1">or drag and drop</p>
-                  </div>
-                  <p className="text-xs text-gray-500 mt-2">
-                    DICOM files (.dcm or without extension) or ZIP archives
-                    containing DICOMs
-                  </p>
+                      <path d="M12 16a1 1 0 001-1V8.414l2.293 2.293a1 1 0 001.414-1.414l-4-4a1 1 0 00-1.414 0l-4 4a1 1 0 101.414 1.414L11 8.414V15a1 1 0 001 1z" />
+                      <path d="M5 20a2 2 0 01-2-2v-3a1 1 0 112 0v3h14v-3a1 1 0 112 0v3a2 2 0 01-2 2H5z" />
+                    </svg>
+                    {uploading ? "Uploading…" : "Upload Image"}
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <select
+                    value={selectedEndpointId}
+                    onChange={(e) => {
+                      const id = e.target.value;
+                      setSelectedEndpointId(id);
+                      const ep = assignedEndpoints.find((x) => x._id === id);
+                      if (ep) {
+                        setCalledAET(ep.calledAET || "");
+                        setPeerHost(ep.host || "");
+                        setPeerPort(ep.port || "");
+                      }
+                    }}
+                    className="w-72 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+                  >
+                    <option value="">Select endpoint…</option>
+                    {assignedEndpoints.map((ep) => (
+                      <option key={ep._id} value={ep._id}>
+                        {ep.calledAET} ({ep.host}:{ep.port})
+                      </option>
+                    ))}
+                  </select>
+
+                  <button
+                    onClick={async () => {
+                      if (!user) return;
+                      // Validate all required fields before calling the API
+                      if (
+                        !callingAET ||
+                        !calledAET ||
+                        !peerHost ||
+                        !peerPort ||
+                        String(peerPort).trim() === ""
+                      ) {
+                        setToastMsg(
+                          "Please select an endpoint and ensure AE, host, and port are set."
+                        );
+                        setTimeout(() => setToastMsg(""), 2000);
+                        return;
+                      }
+                      const res = await fetch("/api/dicom/send", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          userId: user.id,
+                          callingAET,
+                          calledAET,
+                          host: peerHost,
+                          port: Number(peerPort) || peerPort,
+                        }),
+                      });
+                      const data = await res.json();
+                      if (res.ok) {
+                        setToastMsg("C-STORE sent");
+                        setTimeout(() => setToastMsg(""), 1000);
+                        loadHistory();
+                      } else {
+                        setToastMsg(
+                          (
+                            data.stderr ||
+                            data.stdout ||
+                            data.error ||
+                            "Send failed"
+                          ).slice(0, 300)
+                        );
+                        setTimeout(() => setToastMsg(""), 2000);
+                      }
+                    }}
+                    className="inline-flex items-center rounded-md bg-gray-800 px-4 py-2 text-white text-sm font-medium hover:bg-black"
+                  >
+                    Send
+                  </button>
+                  <button
+                    onClick={() => setIsGroupModalOpen(true)}
+                    className="inline-flex items-center rounded-md bg-blue-600 px-4 py-2 text-white text-sm font-medium hover:bg-blue-700"
+                  >
+                    Image History
+                  </button>
                 </div>
               </div>
 
@@ -766,7 +1047,7 @@ export default function Dashboard() {
               <div className="px-4 py-5 sm:p-6">
                 <div className="flex items-center justify-between mb-4">
                   <h2 className="text-lg font-medium text-gray-900">
-                    DICOM Network (C-STORE) Settings
+                    Add AE Title
                   </h2>
                   <div className="flex items-center gap-3">
                     <div className="relative inline-block" ref={profileMenuRef}>
@@ -969,7 +1250,12 @@ export default function Dashboard() {
                         Uploaded Images
                       </dt>
                       <dd className="text-lg font-medium text-gray-900">
-                        {history.filter((h) => h.action === "uploaded").length}
+                        {history
+                          .filter((h) => h.action === "uploaded")
+                          .reduce(
+                            (total, h) => total + (h.metadata?.fileCount || 1),
+                            0
+                          )}
                       </dd>
                     </dl>
                   </div>
@@ -1350,6 +1636,12 @@ export default function Dashboard() {
                 <h2 className="text-lg font-medium text-gray-900">
                   Image History
                 </h2>
+                <input
+                  value={historySearch}
+                  onChange={(e) => setHistorySearch(e.target.value)}
+                  placeholder="Search name, ID, accession, UID…"
+                  className="w-72 rounded-md border border-gray-900 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+                />
                 <button
                   onClick={async () => {
                     if (!user?.id) return;
@@ -1451,37 +1743,94 @@ export default function Dashboard() {
                             </td>
                           </tr>
                           {group.items.map((entry) => {
+                            // Apply anonymization to metadata
+                            const anonymizedMetadata = applyAnonymization(
+                              entry.metadata,
+                              anonymizationSettings
+                            );
+
                             const patientName =
+                              maskedNameByFilename[entry.filename] ||
                               patientByFilename[entry.filename] ||
-                              entry.metadata?.patientName ||
+                              anonymizedMetadata?.patientName ||
                               "-";
-                            const patientId = entry.metadata?.patientId || "-";
-                            const modality = entry.metadata?.modality || "-";
+                            const patientId =
+                              anonymizationSettings?.anonymizePatientId
+                                ? maskedNameByFilename[entry.filename] ||
+                                  anonymizedMetadata?.patientId ||
+                                  "-"
+                                : anonymizedMetadata?.patientId || "-";
+                            const modality =
+                              anonymizedMetadata?.modality || "-";
                             const studyDesc =
-                              entry.metadata?.studyDescription || "-";
-                            const site =
-                              entry.metadata?.institutionName ||
-                              entry.metadata?.stationName ||
-                              "-";
-                            const sex = entry.metadata?.patientSex || "-";
-                            const age = entry.metadata?.patientBirthDate
+                              anonymizedMetadata?.studyDescription || "-";
+                            const site = (() => {
+                              const s = anonymizationSettings || {};
+                              if (s.anonymizeInstitutionName) {
+                                return (
+                                  maskedNameByFilename[entry.filename] ||
+                                  s.customPrefix ||
+                                  "***"
+                                );
+                              }
+                              return (
+                                anonymizedMetadata?.institutionName ||
+                                anonymizedMetadata?.stationName ||
+                                "-"
+                              );
+                            })();
+                            const stationDisplay = (() => {
+                              const s = anonymizationSettings || {};
+                              if (s.anonymizeInstitutionAddress) {
+                                return (
+                                  maskedNameByFilename[entry.filename] ||
+                                  s.customPrefix ||
+                                  "***"
+                                );
+                              }
+                              return anonymizedMetadata?.stationName || "-";
+                            })();
+                            const sex = anonymizedMetadata?.patientSex || "-";
+                            const age = anonymizedMetadata?.patientBirthDate
                               ? new Date().getFullYear() -
                                 parseInt(
-                                  entry.metadata.patientBirthDate.substring(
+                                  anonymizedMetadata.patientBirthDate.substring(
                                     0,
                                     4
                                   )
                                 )
                               : "-";
                             const studyUID =
-                              entry.metadata?.studyInstanceUID || "-";
+                              anonymizedMetadata?.studyInstanceUID || "-";
                             const seriesUID =
-                              entry.metadata?.seriesInstanceUID || "-";
-                            const studyIdVal = entry.metadata?.studyId || "-";
-                            const accessionNumber =
-                              entry.metadata?.accessionNumber || "-";
-                            const referringPhysician =
-                              entry.metadata?.referringPhysicianName || "-";
+                              anonymizedMetadata?.seriesInstanceUID || "-";
+                            const studyIdVal =
+                              anonymizedMetadata?.studyId || "-";
+                            const accessionNumber = (() => {
+                              const s = anonymizationSettings || {};
+                              if (s.anonymizeAccessionNumber) {
+                                return (
+                                  maskedNameByFilename[entry.filename] ||
+                                  s.customPrefix ||
+                                  "***"
+                                );
+                              }
+                              return anonymizedMetadata?.accessionNumber || "-";
+                            })();
+                            const referringPhysician = (() => {
+                              const s = anonymizationSettings || {};
+                              if (s.anonymizeReferringPhysician) {
+                                return (
+                                  maskedNameByFilename[entry.filename] ||
+                                  s.customPrefix ||
+                                  "***"
+                                );
+                              }
+                              return (
+                                anonymizedMetadata?.referringPhysicianName ||
+                                "-"
+                              );
+                            })();
 
                             return (
                               <React.Fragment key={entry._id}>
@@ -1679,7 +2028,7 @@ export default function Dashboard() {
                                         Station:
                                       </span>
                                       <span className="ml-1 text-gray-800">
-                                        {entry.metadata?.stationName || "-"}
+                                        {stationDisplay}
                                       </span>
                                     </div>
                                     <div className="text-xs">

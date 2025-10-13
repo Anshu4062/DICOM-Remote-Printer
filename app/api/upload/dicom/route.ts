@@ -285,27 +285,76 @@ export async function POST(request: NextRequest) {
       console.error("Metadata extraction error:", metaError);
     }
 
-    // Save history entry for uploaded file with key metadata
-    const historyEntry = new ImageHistory({
-      userId,
-      filename,
-      action: "uploaded",
-      metadata: { ...keyMeta },
-      createdAt: new Date(),
-    });
-    await historyEntry.save();
+    // Additionally: auto-compress single DICOM into a ZIP for transport/display consistency
+    try {
+      const zip = new JSZip();
+      const zipInnerName = filename;
+      zip.file(zipInnerName, buffer);
+      const zipBuffer = await zip.generateAsync({ type: "nodebuffer" });
+      const zipFilename = `${timestamp}_${baseName.replace(
+        /\.[^/.]+$/,
+        ""
+      )}.zip`;
+      const zipFilepath = join(uploadsDir, zipFilename);
+      await writeFile(zipFilepath, zipBuffer);
 
-    return NextResponse.json(
-      {
-        message: "File uploaded successfully",
-        filename: filename,
-        filepath: filepath,
-        size: file.size,
-        type: file.type,
-        metadata: keyMeta,
-      },
-      { status: 200 }
-    );
+      // Record history as a grouped ZIP with one file
+      const historyEntry = new ImageHistory({
+        userId,
+        filename: zipFilename,
+        action: "uploaded",
+        metadata: {
+          zip: true,
+          fileCount: 1,
+          files: [filename],
+          ...keyMeta,
+        },
+        createdAt: new Date(),
+      });
+      await historyEntry.save();
+
+      // Cache metadata under both the dicom and the zip name
+      try {
+        const cacheDir = join(uploadsDir, "_meta");
+        if (!existsSync(cacheDir)) await mkdir(cacheDir, { recursive: true });
+        await writeFile(
+          join(cacheDir, `${zipFilename}.json`),
+          Buffer.from(JSON.stringify(keyMeta, null, 2))
+        );
+      } catch {}
+
+      return NextResponse.json(
+        {
+          message: "File uploaded and compressed",
+          filename: zipFilename,
+          original: filename,
+          zipFile: zipFilename,
+          metadata: keyMeta,
+        },
+        { status: 200 }
+      );
+    } catch (e) {
+      // Fallback: if zipping fails, still save plain entry
+      const historyEntry = new ImageHistory({
+        userId,
+        filename,
+        action: "uploaded",
+        metadata: { ...keyMeta },
+        createdAt: new Date(),
+      });
+      await historyEntry.save();
+      return NextResponse.json(
+        {
+          message: "File uploaded successfully (zip failed)",
+          filename: filename,
+          filepath: filepath,
+          size: file.size,
+          type: file.type,
+          metadata: keyMeta,
+        },
+        { status: 200 }
+      );
+    }
   } catch (error) {
     console.error("Upload error:", error);
     return NextResponse.json(

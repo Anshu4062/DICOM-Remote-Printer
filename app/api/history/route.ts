@@ -63,9 +63,13 @@ export async function GET(req: NextRequest) {
           referringPhysicianName: pickFirstNonEmpty("0008,0090"),
         } as any;
       };
-      const baseDir = join(process.cwd(), "uploads", userId as string);
-      const cacheDir = join(baseDir, "_meta");
       history = history.map((h: any) => {
+        const baseDir = join(
+          process.cwd(),
+          h.action === "received" ? "receives" : "uploads",
+          userId as string
+        );
+        const cacheDir = join(baseDir, "_meta");
         // Try both the entry filename and, if a ZIP, the first extracted DICOM
         const mergePrefer = (current: any, incoming: any) => {
           const out: any = { ...current };
@@ -116,6 +120,12 @@ export async function GET(req: NextRequest) {
           ) {
             targetFile = h.metadata.files[0];
           }
+          const baseDir = join(
+            process.cwd(),
+            h.action === "received" ? "receives" : "uploads",
+            userId as string
+          );
+          const cacheDir = join(baseDir, "_meta");
           const dicomPath = join(baseDir, targetFile);
           if (!existsSync(dicomPath)) continue;
           const { stdout } = await execAsync(`dcmdump "${dicomPath}"`);

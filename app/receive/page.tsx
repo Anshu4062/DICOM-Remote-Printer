@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 interface User {
@@ -19,6 +19,7 @@ export default function Receive() {
   const [metadata, setMetadata] = useState<any>(null);
   const [knownFiles, setKnownFiles] = useState<Set<string>>(new Set());
   const [history, setHistory] = useState<any[]>([]);
+  const [search, setSearch] = useState("");
   const [callingAET, setCallingAET] = useState("RECEIVER");
   const [port, setPort] = useState("11112");
   const router = useRouter();
@@ -164,6 +165,121 @@ export default function Receive() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
+  // Group received history by Study Instance UID and compute merged metadata + counts
+  const receivedGroups = useMemo(() => {
+    const received = (history || []).filter((h) => h.action === "received");
+    const byKey = new Map<string, any[]>();
+    for (const h of received) {
+      const m = h?.metadata || {};
+      const stablePatient = m.patientId || m.patientName || "";
+      const altStudy = m.accessionNumber || m.studyId || "";
+      const altDate = m.studyDate || "";
+      const key =
+        m.studyInstanceUID && String(m.studyInstanceUID).trim() !== ""
+          ? String(m.studyInstanceUID)
+          : altStudy
+          ? `${stablePatient}::${altStudy}`
+          : stablePatient || altDate
+          ? `${stablePatient}::${altDate}`
+          : `file:${h.filename}`;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key)!.push(h);
+    }
+
+    const pickFirstNonEmpty = (items: any[], path: string[]) => {
+      for (const it of items) {
+        let cur: any = it?.metadata || {};
+        for (const p of path) cur = cur?.[p];
+        if (cur !== undefined && cur !== null && String(cur).trim() !== "") {
+          return cur;
+        }
+      }
+      return undefined;
+    };
+
+    const groups: Array<{
+      key: string;
+      count: number;
+      items: any[];
+      firstCreatedAt: string;
+      lastCreatedAt: string;
+      merged: any;
+      firstFilename: string;
+    }> = [];
+
+    byKey.forEach((items, key) => {
+      const sorted = [...items].sort(
+        (a, b) =>
+          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+      );
+      const first = sorted[0];
+      const last = sorted[sorted.length - 1];
+      const merged = {
+        patientName:
+          pickFirstNonEmpty(sorted, ["patientName"]) ||
+          first?.metadata?.patientName,
+        patientId:
+          pickFirstNonEmpty(sorted, ["patientId"]) ||
+          first?.metadata?.patientId,
+        patientSex:
+          pickFirstNonEmpty(sorted, ["patientSex"]) ||
+          first?.metadata?.patientSex,
+        patientBirthDate:
+          pickFirstNonEmpty(sorted, ["patientBirthDate"]) ||
+          first?.metadata?.patientBirthDate,
+        modality:
+          pickFirstNonEmpty(sorted, ["modality"]) || first?.metadata?.modality,
+        studyDescription:
+          pickFirstNonEmpty(sorted, ["studyDescription"]) ||
+          first?.metadata?.studyDescription,
+        institutionName:
+          pickFirstNonEmpty(sorted, ["institutionName"]) ||
+          first?.metadata?.institutionName,
+        stationName:
+          pickFirstNonEmpty(sorted, ["stationName"]) ||
+          first?.metadata?.stationName,
+        studyInstanceUID:
+          pickFirstNonEmpty(sorted, ["studyInstanceUID"]) ||
+          first?.metadata?.studyInstanceUID,
+        seriesInstanceUID:
+          pickFirstNonEmpty(sorted, ["seriesInstanceUID"]) ||
+          first?.metadata?.seriesInstanceUID,
+        studyId:
+          pickFirstNonEmpty(sorted, ["studyId"]) || first?.metadata?.studyId,
+        accessionNumber:
+          pickFirstNonEmpty(sorted, ["accessionNumber"]) ||
+          first?.metadata?.accessionNumber,
+        referringPhysicianName:
+          pickFirstNonEmpty(sorted, ["referringPhysicianName"]) ||
+          first?.metadata?.referringPhysicianName,
+      };
+      // Count individual images (each item represents one DICOM file)
+      // For received files, each history entry is typically one DICOM image
+      const totalImages = items.reduce((total, item) => {
+        // If the item has fileCount metadata (from zip files), use that
+        // Otherwise, each item counts as 1 image
+        return total + (item.metadata?.fileCount || 1);
+      }, 0);
+
+      groups.push({
+        key,
+        count: totalImages, // Total individual images in this study
+        items,
+        firstCreatedAt: first?.createdAt,
+        lastCreatedAt: last?.createdAt,
+        merged,
+        firstFilename: first?.filename,
+      });
+    });
+    // newest first by last activity
+    groups.sort(
+      (a, b) =>
+        new Date(b.lastCreatedAt).getTime() -
+        new Date(a.lastCreatedAt).getTime()
+    );
+    return groups;
+  }, [history]);
+
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white shadow">
@@ -291,54 +407,170 @@ export default function Receive() {
           </div>
         </div>
 
-        {/* History at bottom */}
+        {/* History at bottom - grouped by Study UID with detailed 3-row layout */}
         <div className="mt-6 bg-white shadow rounded-lg p-6">
-          <h2 className="text-lg font-medium text-gray-900 mb-3">
-            Received History
-          </h2>
-          {!history?.length ? (
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-lg font-medium text-gray-900">
+              Received History
+            </h2>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search name, ID, accession, UID…"
+              className="w-72 rounded-md border border-gray-900 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+            />
+          </div>
+          {!receivedGroups.length ? (
             <div className="text-sm text-gray-500">No entries yet.</div>
           ) : (
             <div className="overflow-auto">
-              <table className="min-w-full text-sm">
-                <thead>
-                  <tr className="text-left text-gray-600 border-b">
-                    <th className="py-2 pr-4">Action</th>
-                    <th className="py-2 pr-4">Filename</th>
-                    <th className="py-2 pr-4">Patient</th>
-                    <th className="py-2 pr-4">Date/Time</th>
-                    <th className="py-2 pr-4">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {history
-                    .filter((h) => h.action === "received")
-                    .map((h) => (
-                      <tr key={h._id} className="border-b">
-                        <td className="py-2 pr-4">
-                          <span className="inline-block px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">
+              <div className="min-w-[1000px]">
+                <div className="grid grid-cols-12 text-sm text-gray-700 border-b pb-3">
+                  <div className="col-span-2 font-medium">Action</div>
+                  <div className="col-span-3 font-medium">Patient / Study</div>
+                  <div className="col-span-3 font-medium">Site / Station</div>
+                  <div className="col-span-3 font-medium">UIDs</div>
+                  <div className="col-span-1 text-right font-medium">
+                    Images
+                  </div>
+                </div>
+                {receivedGroups
+                  .filter((g) => {
+                    const t = (search || "").toLowerCase();
+                    if (!t) return true;
+                    const m = g.merged || {};
+                    const hay = [
+                      g.firstFilename,
+                      m.patientName,
+                      m.patientId,
+                      m.accessionNumber,
+                      m.studyId,
+                      m.studyInstanceUID,
+                      m.seriesInstanceUID,
+                      m.institutionName,
+                      m.stationName,
+                    ]
+                      .filter(Boolean)
+                      .join(" ")
+                      .toLowerCase();
+                    return hay.includes(t);
+                  })
+                  .map((g) => (
+                    <div key={g.key} className="py-4 border-b">
+                      {/* Row 1 */}
+                      <div className="grid grid-cols-12 items-start gap-3">
+                        <div className="col-span-2">
+                          <span className="inline-flex px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-xs">
                             Received
                           </span>
-                        </td>
-                        <td className="py-2 pr-4 break-all">{h.filename}</td>
-                        <td className="py-2 pr-4">
-                          {h.metadata?.patientName || "-"}
-                        </td>
-                        <td className="py-2 pr-4">
-                          {new Date(h.createdAt).toLocaleString()}
-                        </td>
-                        <td className="py-2 pr-4">
+                          <div className="mt-2 text-xs text-gray-600 break-all">
+                            {g.firstFilename}
+                          </div>
+                          <div className="mt-1 text-xs text-gray-600">
+                            {new Date(g.lastCreatedAt).toLocaleString()}
+                          </div>
+                        </div>
+                        <div className="col-span-3">
+                          <div className="text-base font-semibold text-gray-900 truncate">
+                            {g.merged.patientName || "-"}
+                            {g.merged.patientId ? (
+                              <span className="text-gray-500 font-normal">
+                                {" "}
+                                • ID: {g.merged.patientId}
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="text-sm text-gray-700">
+                            {g.merged.modality || "-"}
+                            {g.merged.studyDescription ? (
+                              <span className="text-gray-500">
+                                {" "}
+                                • {g.merged.studyDescription}
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+                        <div className="col-span-3">
+                          <div className="text-sm text-gray-700">
+                            {g.merged.institutionName || "-"}
+                            {g.merged.stationName ? (
+                              <span className="text-gray-500">
+                                {" "}
+                                • {g.merged.stationName}
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="text-sm text-gray-700">
+                            Accession: {g.merged.accessionNumber || "-"}
+                            {g.merged.studyId ? (
+                              <span className="text-gray-500">
+                                {" "}
+                                • Study ID: {g.merged.studyId}
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+                        <div className="col-span-3">
+                          <div className="text-[12px] font-mono bg-blue-50 rounded border border-blue-200 text-blue-800 px-3 py-1.5 break-all">
+                            <span className="font-semibold">Study UID:</span>{" "}
+                            {g.merged.studyInstanceUID || "-"}
+                          </div>
+                          <div className="mt-1 text-[12px] font-mono bg-blue-50 rounded border border-blue-200 text-blue-800 px-3 py-1.5 break-all">
+                            <span className="font-semibold">Series UID:</span>{" "}
+                            {g.merged.seriesInstanceUID || "-"}
+                          </div>
+                        </div>
+                        <div className="col-span-1 text-right font-bold text-gray-900">
+                          {g.count}
+                        </div>
+                      </div>
+                      {/* Row 2 */}
+                      <div className="grid grid-cols-12 mt-3 text-sm text-gray-800">
+                        <div className="col-span-4">
+                          Sex: {g.merged.patientSex || "-"}
+                        </div>
+                        <div className="col-span-4">
+                          Referring: {g.merged.referringPhysicianName || "-"}
+                        </div>
+                        <div className="col-span-4">
+                          First received:{" "}
+                          {new Date(g.firstCreatedAt).toLocaleString()}
+                        </div>
+                      </div>
+                      {/* Row 3 - File Location */}
+                      <div className="grid grid-cols-12 mt-3 text-sm text-gray-800">
+                        <div className="col-span-12">
+                          <span className="font-medium text-gray-600">
+                            Location:
+                          </span>{" "}
+                          <span className="font-mono text-xs bg-gray-100 px-2 py-1 rounded break-all">
+                            {status?.outDir || `receives/${user?.id}`}/
+                            {g.merged.studyInstanceUID
+                              ? `${g.merged.studyInstanceUID}/`
+                              : ""}
+                            {g.firstFilename}
+                          </span>
+                          <div className="mt-1 text-xs text-gray-600">
+                            {g.items.length}{" "}
+                            {g.items.length === 1 ? "study" : "studies"} •{" "}
+                            {g.count} {g.count === 1 ? "image" : "images"}
+                          </div>
+                        </div>
+                      </div>
+                      {/* Row 4 - Actions */}
+                      <div className="grid grid-cols-12 mt-3 text-sm text-gray-800">
+                        <div className="col-span-12 flex gap-2">
                           <button
-                            onClick={() => viewMetadata(h.filename)}
-                            className="px-2 py-1 text-xs rounded bg-blue-600 text-white"
+                            onClick={() => viewMetadata(g.firstFilename)}
+                            className="px-3.5 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white text-xs shadow-sm"
                           >
                             View Metadata
                           </button>
-                        </td>
-                      </tr>
-                    ))}
-                </tbody>
-              </table>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+              </div>
             </div>
           )}
         </div>

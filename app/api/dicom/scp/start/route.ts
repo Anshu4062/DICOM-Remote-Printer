@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { spawn } from "child_process";
+import { spawn, exec } from "child_process";
 import { join } from "path";
-import { mkdirSync, existsSync } from "fs";
+import { mkdirSync, existsSync, watch, rename, stat } from "fs";
+import { promisify } from "util";
 
 export const runtime = "nodejs";
 
@@ -27,6 +28,69 @@ function getRegistry() {
   return global.__SCP_REGISTRY__;
 }
 
+// Function to organize received files by Study UID
+async function organizeFileByStudyUID(filePath: string, userId: string) {
+  try {
+    // Use dcmdump to extract Study Instance UID
+    const { exec } = await import("child_process");
+    const { promisify } = await import("util");
+    const execAsync = promisify(exec);
+
+    const { stdout } = await execAsync(`dcmdump "${filePath}"`);
+
+    // Extract Study Instance UID from dcmdump output
+    const studyUIDMatch = stdout.match(/\(0020,000d\)\s+UI\s+\[([^\]]+)\]/i);
+    if (studyUIDMatch && studyUIDMatch[1]) {
+      const studyUID = studyUIDMatch[1].trim();
+
+      // Create Study UID folder
+      const studyDir = join(process.cwd(), "receives", userId, studyUID);
+      if (!existsSync(studyDir)) {
+        mkdirSync(studyDir, { recursive: true });
+      }
+
+      // Move file to Study UID folder
+      const fileName = filePath.split("/").pop() || filePath.split("\\").pop();
+      const newPath = join(studyDir, fileName || "unknown.dcm");
+
+      const { rename } = await import("fs");
+      const renameAsync = promisify(rename);
+      await renameAsync(filePath, newPath);
+
+      console.log(
+        `[File Organizer] Moved ${fileName} to Study UID folder: ${studyUID}`
+      );
+      return newPath;
+    }
+  } catch (error) {
+    console.error(`[File Organizer] Error organizing file ${filePath}:`, error);
+  }
+  return filePath;
+}
+
+// Function to start file monitoring
+function startFileMonitoring(outDir: string, userId: string) {
+  if (!existsSync(outDir)) return;
+
+  const watcher = watch(outDir, (eventType, filename) => {
+    if (eventType === "rename" && filename) {
+      const filePath = join(outDir, filename);
+
+      // Check if file exists and is not a directory
+      stat(filePath, (err, stats) => {
+        if (err || stats.isDirectory()) return;
+
+        // Wait a moment for file to be fully written
+        setTimeout(() => {
+          organizeFileByStudyUID(filePath, userId);
+        }, 1000);
+      });
+    }
+  });
+
+  return watcher;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const { userId, aeTitle, port } = await req.json();
@@ -49,6 +113,15 @@ export async function POST(req: NextRequest) {
 
     const outDir = join(process.cwd(), "receives", userId);
     if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
+
+    // Pre-start cleanup: terminate any orphaned storescp instances so we don't double-run
+    await new Promise<void>((resolve) => {
+      const cmd =
+        process.platform === "win32"
+          ? "taskkill /IM storescp.exe /F /T"
+          : "pkill -f storescp || true";
+      exec(cmd, () => resolve());
+    });
 
     const args = ["-v", "-aet", ae, "-od", outDir, String(p)];
     const candidateBinaries: string[] = [];
@@ -142,6 +215,9 @@ export async function POST(req: NextRequest) {
       command,
       logs: initialLogs,
     });
+
+    // Start file monitoring to organize files by Study UID
+    const fileWatcher = startFileMonitoring(outDir, userId);
 
     // Continue appending to the in-memory log buffer for later status fetches
     child.stdout.on("data", (d) => {
