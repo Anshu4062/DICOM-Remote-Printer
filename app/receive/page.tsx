@@ -58,6 +58,8 @@ export default function Receive() {
       if (newOnes.length) {
         const updated = new Set(knownFiles);
         for (const f of newOnes) {
+          // Skip metadata cache entries
+          if (f.includes("/_meta/") || f.endsWith(".json")) continue;
           updated.add(f);
           try {
             // fetch minimal metadata to capture patient name
@@ -167,7 +169,9 @@ export default function Receive() {
 
   // Group received history by Study Instance UID and compute merged metadata + counts
   const receivedGroups = useMemo(() => {
-    const received = (history || []).filter((h) => h.action === "received");
+    const received = (history || [])
+      .filter((h) => h.action === "received")
+      .filter((h) => h?.filename && !h.filename.endsWith(".json"));
     const byKey = new Map<string, any[]>();
     for (const h of received) {
       const m = h?.metadata || {};
@@ -413,12 +417,41 @@ export default function Receive() {
             <h2 className="text-lg font-medium text-gray-900">
               Received History
             </h2>
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search name, ID, accession, UID…"
-              className="w-72 rounded-md border border-gray-900 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-            />
+            <div className="flex items-center gap-3">
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search name, ID, accession, UID…"
+                className="w-72 rounded-md border border-gray-900 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+              />
+              <button
+                onClick={async () => {
+                  if (!user) return;
+                  await fetch(
+                    `/api/dicom/scp/status?userId=${encodeURIComponent(
+                      user.id
+                    )}`,
+                    {
+                      method: "DELETE",
+                    }
+                  );
+                  // Also clear history entries and uploads/receives files for this user
+                  await fetch(
+                    `/api/history?userId=${encodeURIComponent(
+                      user.id
+                    )}&all=true&keepReceives=true`,
+                    { method: "DELETE" }
+                  );
+                  setKnownFiles(new Set());
+                  await loadHistory();
+                  await refreshStatus();
+                }}
+                className="px-3 py-2 rounded-md bg-red-600 text-white text-sm hover:bg-red-700"
+                title="Delete all received files"
+              >
+                Clear All
+              </button>
+            </div>
           </div>
           {!receivedGroups.length ? (
             <div className="text-sm text-gray-500">No entries yet.</div>
@@ -544,11 +577,17 @@ export default function Receive() {
                             Location:
                           </span>{" "}
                           <span className="font-mono text-xs bg-gray-100 px-2 py-1 rounded break-all">
-                            {status?.outDir || `receives/${user?.id}`}/
-                            {g.merged.studyInstanceUID
-                              ? `${g.merged.studyInstanceUID}/`
-                              : ""}
-                            {g.firstFilename}
+                            {(() => {
+                              const base =
+                                status?.outDir || `receives/${user?.id}`;
+                              if (g.firstFilename.includes("/")) {
+                                return `${base}/${g.firstFilename}`;
+                              }
+                              const maybeUID = g.merged?.studyInstanceUID;
+                              if (maybeUID)
+                                return `${base}/${maybeUID}/${g.firstFilename}`;
+                              return `${base}/${g.firstFilename}`;
+                            })()}
                           </span>
                           <div className="mt-1 text-xs text-gray-600">
                             {g.items.length}{" "}
@@ -565,6 +604,44 @@ export default function Receive() {
                             className="px-3.5 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white text-xs shadow-sm"
                           >
                             View Metadata
+                          </button>
+                          <button
+                            onClick={async () => {
+                              if (!user) return;
+                              const relPath = g.firstFilename;
+                              const relDir = relPath.includes("/")
+                                ? relPath.substring(
+                                    0,
+                                    relPath.lastIndexOf("/") + 1
+                                  )
+                                : "";
+                              await fetch("/api/files/open", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                  userId: user.id,
+                                  scope: "received",
+                                  relDir,
+                                }),
+                              });
+                            }}
+                            className="px-3.5 py-1.5 rounded bg-gray-700 hover:bg-gray-800 text-white text-xs shadow-sm"
+                          >
+                            Open Folder
+                          </button>
+                          <button
+                            onClick={async () => {
+                              const base =
+                                status?.outDir || `receives/${user?.id}`;
+                              const full = `${base}/${g.firstFilename}`;
+                              try {
+                                await navigator.clipboard.writeText(full);
+                              } catch {}
+                            }}
+                            className="px-3.5 py-1.5 rounded bg-gray-200 hover:bg-gray-300 text-gray-900 text-xs shadow-sm"
+                            title="Copy full path"
+                          >
+                            Copy Path
                           </button>
                         </div>
                       </div>

@@ -28,6 +28,7 @@ export default function AdminPage() {
     }>
   >([]);
   const [selectedProfileId, setSelectedProfileId] = useState("");
+  const [selectedDbEndpointId, setSelectedDbEndpointId] = useState<string>("");
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const profileMenuRef = useRef<HTMLDivElement | null>(null);
   const [users, setUsers] = useState<
@@ -149,12 +150,12 @@ export default function AdminPage() {
 
     setLoadingSettings((prev) => new Set(prev).add(userId));
     try {
-      const res = await fetch(`/api/admin/anonymization?userId=${userId}`);
+      const res = await fetch(`/api/admin/user-settings?userId=${userId}`);
       const data = await res.json();
       if (res.ok && data?.success) {
         setAnonymizationSettings((prev) => ({
           ...prev,
-          [userId]: data.settings.settings || {},
+          [userId]: data.settings?.settings || {},
         }));
       }
     } catch (error) {
@@ -170,7 +171,7 @@ export default function AdminPage() {
 
   const saveAnonymizationSettings = async (userId: string, settings: any) => {
     try {
-      const res = await fetch("/api/admin/anonymization", {
+      const res = await fetch("/api/admin/user-settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId, settings }),
@@ -205,25 +206,40 @@ export default function AdminPage() {
     setExpandedUsers(newExpanded);
   };
 
-  const handleSaveProfile = () => {
+  const handleSaveProfile = async () => {
     if (isSaving) return;
     setIsSaving(true);
-    setTimeout(() => {
-      const id = Math.random().toString(36).slice(2);
+    try {
       const name = `${peerHost || "host"}:${peerPort || "port"} (${
         calledAET || "AE"
       })`;
-      const updated = [
-        ...profiles,
-        { id, name, callingAET, calledAET, host: peerHost, port: peerPort },
-      ];
-      setProfiles(updated);
-      localStorage.setItem("storescuProfiles", JSON.stringify(updated));
-      setSelectedProfileId(id);
+      const res = await fetch("/api/admin/endpoints", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          calledAET,
+          host: peerHost,
+          port: peerPort,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.success)
+        throw new Error(data?.error || "Failed to save");
+      // Refresh database endpoints so they appear immediately after reload
+      try {
+        const r = await fetch("/api/admin/endpoints");
+        const d = await r.json();
+        if (r.ok && d?.success) setEndpoints(d.endpoints || []);
+      } catch {}
       setToastMsg("Saved endpoint");
       setTimeout(() => setToastMsg(""), 1000);
+    } catch (e: any) {
+      setToastMsg(e?.message || "Failed to save endpoint");
+      setTimeout(() => setToastMsg(""), 1200);
+    } finally {
       setIsSaving(false);
-    }, 800);
+    }
   };
 
   const handleSelectProfile = (id: string) => {
@@ -275,7 +291,7 @@ export default function AdminPage() {
           </div>
         )}
 
-        <div className="bg-white overflow-hidden shadow rounded-lg">
+        <div className="bg-white shadow rounded-lg relative z-50 overflow-visible">
           <div className="px-4 py-5 sm:p-6">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-medium text-gray-900">
@@ -289,9 +305,16 @@ export default function AdminPage() {
                     className="inline-flex w-60 items-center justify-between rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm transition hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500"
                   >
                     <span className="truncate">
-                      {selectedProfileId
-                        ? profiles.find((p) => p.id === selectedProfileId)
-                            ?.name || "Endpoint"
+                      {selectedDbEndpointId
+                        ? (() => {
+                            const ep = endpoints.find(
+                              (e) =>
+                                String(e._id) === String(selectedDbEndpointId)
+                            );
+                            return ep
+                              ? `${ep.host}:${ep.port} (${ep.calledAET})`
+                              : "Select saved AE Title…";
+                          })()
                         : "Select saved AE Title…"}
                     </span>
                     <svg
@@ -311,28 +334,31 @@ export default function AdminPage() {
                     </svg>
                   </button>
                   {profileMenuOpen && (
-                    <div className="absolute right-0 z-10 mt-2 w-72 origin-top-right rounded-lg bg-white p-2 text-sm shadow-lg ring-1 ring-black/5 max-h-64 overflow-auto">
-                      {profiles.length === 0 && (
+                    <div className="absolute right-0 z-[9999] mt-2 w-72 origin-top-right rounded-lg bg-white p-2 text-sm shadow-2xl ring-1 ring-black/5 max-h-64 overflow-auto">
+                      {endpoints.length === 0 && (
                         <div className="px-3 py-2 text-gray-500">
                           No saved endpoints
                         </div>
                       )}
-                      {profiles.map((p) => (
+                      {endpoints.map((ep) => (
                         <button
-                          key={p.id}
+                          key={String(ep._id)}
                           onClick={() => {
-                            handleSelectProfile(p.id);
+                            setSelectedDbEndpointId(String(ep._id));
+                            setCalledAET(ep.calledAET);
+                            setPeerHost(ep.host);
+                            setPeerPort(ep.port);
                             setProfileMenuOpen(false);
                           }}
                           className="block w-full rounded-md px-3 py-2 text-left text-gray-700 hover:bg-gray-50"
                         >
-                          {p.name}
+                          {ep.host}:{ep.port} ({ep.calledAET})
                         </button>
                       ))}
-                      {profiles.length > 0 && (
+                      {endpoints.length > 0 && (
                         <button
                           onClick={() => {
-                            setSelectedProfileId("");
+                            setSelectedDbEndpointId("");
                             setCallingAET("");
                             setCalledAET("");
                             setPeerHost("");
@@ -420,7 +446,7 @@ export default function AdminPage() {
           </div>
         </div>
 
-        <div className="mt-6 bg-white overflow-hidden shadow rounded-lg">
+        <div className="mt-6 bg-white overflow-hidden shadow rounded-lg relative z-10">
           <div className="px-4 py-5 sm:p-6">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-medium text-gray-900">Users</h2>
@@ -897,46 +923,6 @@ export default function AdminPage() {
                                         className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
                                           anonymizationSettings[u.id]
                                             ?.anonymizeReferringPhysician
-                                            ? "translate-x-6"
-                                            : "translate-x-1"
-                                        }`}
-                                      />
-                                    </button>
-                                  </div>
-
-                                  {/* Generate XML */}
-                                  <div className="flex items-center gap-2">
-                                    <label className="text-sm text-gray-700">
-                                      Generate XML
-                                    </label>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        const newSettings = {
-                                          ...anonymizationSettings[u.id],
-                                          generateXML:
-                                            !anonymizationSettings[u.id]
-                                              ?.generateXML,
-                                        };
-                                        setAnonymizationSettings((prev) => ({
-                                          ...prev,
-                                          [u.id]: newSettings,
-                                        }));
-                                        saveAnonymizationSettings(
-                                          u.id,
-                                          newSettings
-                                        );
-                                      }}
-                                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
-                                        anonymizationSettings[u.id]?.generateXML
-                                          ? "bg-blue-600"
-                                          : "bg-gray-200"
-                                      }`}
-                                    >
-                                      <span
-                                        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                                          anonymizationSettings[u.id]
-                                            ?.generateXML
                                             ? "translate-x-6"
                                             : "translate-x-1"
                                         }`}

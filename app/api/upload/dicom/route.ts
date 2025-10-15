@@ -5,6 +5,8 @@ import { existsSync } from "fs";
 import JSZip from "jszip";
 import dbConnect from "@/lib/mongodb";
 import ImageHistory from "@/models/ImageHistory";
+import UserSettings from "@/models/UserSettings";
+import { Types } from "mongoose";
 import { exec } from "child_process";
 import { promisify } from "util";
 
@@ -50,7 +52,117 @@ export async function POST(request: NextRequest) {
 
     const execAsync = promisify(exec);
 
+    // Fetch user anonymization settings
+    const getUserSettings = async (userId: string) => {
+      try {
+        const settings = await UserSettings.findOne({
+          userId: new Types.ObjectId(userId),
+        }).lean();
+        return (settings as any)?.settings || {};
+      } catch (error) {
+        console.error("Failed to fetch user settings:", error);
+        return {};
+      }
+    };
+
+    // Compute the next Sequence Name label for this user given a base prefix
+    const getNextSequenceLabel = async (userId: string, basePrefix: string) => {
+      const escapeRegex = (s: string) =>
+        s.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&");
+      const pattern = `^${escapeRegex(basePrefix)}\\d*$`;
+      const count = await ImageHistory.countDocuments({
+        userId,
+        "metadata.sequenceName": { $regex: pattern, $options: "i" },
+      });
+      return count >= 1 ? `${basePrefix}${count + 1}` : basePrefix;
+    };
+
+    // Apply anonymization to DICOM file using dcmodify
+    const anonymizeDicomFile = async (
+      filePath: string,
+      settings: any,
+      filename: string,
+      sequenceLabel: string
+    ) => {
+      const prefix =
+        sequenceLabel || (settings && settings.customPrefix) || "***";
+
+      const tags: string[] = ["(0018,0024)"]; // Sequence Name always
+      if (settings?.anonymizePatientName) tags.push("(0010,0010)");
+      if (settings?.anonymizePatientId) tags.push("(0010,0020)");
+      if (settings?.anonymizeInstitutionName)
+        tags.push("(0008,0080)", "(0008,1040)");
+      if (settings?.anonymizeInstitutionAddress) tags.push("(0008,1010)");
+      if (settings?.anonymizeReferringPhysician) tags.push("(0008,0090)");
+      if (settings?.anonymizeAccessionNumber) tags.push("(0008,0050)");
+
+      const runForTag = async (tag: string) => {
+        try {
+          const cmd = `dcmodify --modify "${tag}=${prefix}" "${filePath}"`;
+          console.log(`Anonymizing DICOM: ${cmd}`);
+          await execAsync(cmd);
+        } catch (e) {
+          console.warn(`modify failed for ${tag}, trying insert`);
+          try {
+            const cmd2 = `dcmodify --insert "${tag}=${prefix}" "${filePath}"`;
+            console.log(`Anonymizing DICOM (insert): ${cmd2}`);
+            await execAsync(cmd2);
+          } catch (e2) {
+            console.error(`Failed to set ${tag} on ${filename}:`, e2);
+          }
+        }
+      };
+
+      for (const t of tags) {
+        await runForTag(t);
+      }
+
+      console.log(`Successfully anonymized: ${filename}`);
+      return filePath;
+    };
+
+    // Apply anonymization to metadata object
+    const anonymizeMetadata = (
+      metadata: any,
+      settings: any,
+      filename: string,
+      sequenceLabel: string
+    ) => {
+      const anonymized = { ...metadata };
+      const prefix =
+        sequenceLabel || (settings && settings.customPrefix) || "***";
+
+      // Always set Sequence Name in cached metadata too
+      anonymized.sequenceName = prefix;
+
+      if (!settings || Object.keys(settings).length === 0) {
+        return anonymized;
+      }
+
+      if (settings.anonymizePatientName) {
+        anonymized.patientName = prefix;
+      }
+      if (settings.anonymizePatientId) {
+        anonymized.patientId = prefix;
+      }
+      if (settings.anonymizeInstitutionName) {
+        anonymized.institutionName = prefix;
+      }
+      if (settings.anonymizeInstitutionAddress) {
+        anonymized.stationName = prefix;
+      }
+      if (settings.anonymizeReferringPhysician) {
+        anonymized.referringPhysicianName = prefix;
+      }
+      if (settings.anonymizeAccessionNumber) {
+        anonymized.accessionNumber = prefix;
+      }
+
+      return anonymized;
+    };
+
     const parseKeyFields = (stdout: string) => {
+      // add sequenceName
       const pickFirstNonEmpty = (tag: string) => {
         // Find the first occurrence of this tag that actually has a value in [..]
         const re = new RegExp(
@@ -85,11 +197,19 @@ export async function POST(request: NextRequest) {
         studyId: pickFirstNonEmpty("0020,0010"),
         accessionNumber: pickFirstNonEmpty("0008,0050"),
         referringPhysicianName: pickFirstNonEmpty("0008,0090"),
+        sequenceName: pickFirstNonEmpty("0018,0024"),
       } as any;
     };
 
     // Case 1: ZIP archive containing one or more DICOM files
     if (ext === ".zip" || file.type === "application/zip") {
+      // Get user anonymization settings
+      const userSettings = await getUserSettings(userId);
+      const basePrefix =
+        (userSettings?.customPrefix && userSettings.customPrefix.trim()) ||
+        "***";
+      const sequenceLabel = await getNextSequenceLabel(userId, basePrefix);
+
       const zip = await JSZip.loadAsync(buffer);
       const savedFiles: string[] = [];
       const entries = Object.values(zip.files);
@@ -103,6 +223,15 @@ export async function POST(request: NextRequest) {
           }`;
           const outPath = join(uploadsDir, outName);
           await writeFile(outPath, entryBuf);
+
+          // Apply anonymization to the DICOM file
+          await anonymizeDicomFile(
+            outPath,
+            userSettings,
+            outName,
+            sequenceLabel
+          );
+
           savedFiles.push(outName);
         }
       }
@@ -137,6 +266,7 @@ export async function POST(request: NextRequest) {
           "studyId",
           "accessionNumber",
           "referringPhysicianName",
+          "sequenceName",
         ];
         for (const f of fields) {
           if (out[f] === undefined || out[f] === "-") {
@@ -158,7 +288,13 @@ export async function POST(request: NextRequest) {
               console.log(`Running dcmdump on: ${p}`);
               const { stdout } = await execAsync(`dcmdump "${p}"`);
               const parsed = parseKeyFields(stdout);
-              keyMeta = prefer(keyMeta, parsed);
+              const anonymizedParsed = anonymizeMetadata(
+                parsed,
+                userSettings,
+                f,
+                sequenceLabel
+              );
+              keyMeta = prefer(keyMeta, anonymizedParsed);
               // Duplicate check using SOP Instance UID if available
               if (parsed?.sopInstanceUID) {
                 const exists = await ImageHistory.findOne({
@@ -170,7 +306,7 @@ export async function POST(request: NextRequest) {
               // cache JSON for each dicom so later requests are instant
               await writeFile(
                 join(cacheDir, `${f}.json`),
-                Buffer.from(JSON.stringify(parsed, null, 2))
+                Buffer.from(JSON.stringify(anonymizedParsed, null, 2))
               );
               console.log(`Cached metadata for: ${f}`);
             } catch (e) {
@@ -239,6 +375,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Get user anonymization settings
+    const userSettings = await getUserSettings(userId);
+    const basePrefix =
+      (userSettings?.customPrefix && userSettings.customPrefix.trim()) || "***";
+    const sequenceLabel = await getNextSequenceLabel(userId, basePrefix);
+
     // Generate unique filename
     const timestamp = Date.now();
     const baseName = file.name || "dicom";
@@ -248,12 +390,21 @@ export async function POST(request: NextRequest) {
     const filepath = join(uploadsDir, filename);
     await writeFile(filepath, buffer);
 
+    // Apply anonymization to the DICOM file
+    await anonymizeDicomFile(filepath, userSettings, filename, sequenceLabel);
+
     // Extract key metadata and cache immediately
     let keyMeta: any = {};
     try {
       console.log(`Running dcmdump on: ${filepath}`);
       const { stdout } = await execAsync(`dcmdump "${filepath}"`);
-      keyMeta = parseKeyFields(stdout);
+      const parsed = parseKeyFields(stdout);
+      keyMeta = anonymizeMetadata(
+        parsed,
+        userSettings,
+        filename,
+        sequenceLabel
+      );
       console.log(`Extracted metadata:`, keyMeta);
 
       // Duplicate check by SOP Instance UID if available

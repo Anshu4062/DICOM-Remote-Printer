@@ -1,0 +1,22 @@
+{
+  "sopClassUID": "",
+  "sopInstanceUID": "1.2.840.11111.30.152.99999.235.20.100.03092025104701.214931",
+  "studyDate": "20250903",
+  "contentDate": "",
+  "studyTime": "103301",
+  "contentTime": "",
+  "accessionNumber": "",
+  "modality": "DOC",
+  "manufacturer": "",
+  "referringPhysicianName": "^OCCUSURE",
+  "stationName": "dubai study2",
+  "studyDescription": "Chest",
+  "patientName": "dubai study2",
+  "patientId": "8407046125083",
+  "patientBirthDate": "19840704",
+  "patientSex": "M",
+  "patientComments": "AFRIMAT",
+  "studyId": "2509031029269747",
+  "seriesNumber": "1",
+  "instanceNumber": "1"
+}

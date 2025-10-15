@@ -235,11 +235,6 @@ export async function DELETE(req: NextRequest) {
           if (existsSync(uploadsDir))
             rmSync(uploadsDir, { recursive: true, force: true });
         } catch {}
-        try {
-          const receivesDir = join(process.cwd(), "receives", userId);
-          if (existsSync(receivesDir))
-            rmSync(receivesDir, { recursive: true, force: true });
-        } catch {}
         return NextResponse.json({ success: true, cleared: true });
       }
       return NextResponse.json(

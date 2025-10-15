@@ -48,10 +48,10 @@ export async function getUserAnonymizationSettings(
   userId: string
 ): Promise<any> {
   try {
-    const response = await fetch(`/api/admin/anonymization?userId=${userId}`);
+    const response = await fetch(`/api/admin/user-settings?userId=${userId}`);
     const data = await response.json();
     if (response.ok && data?.success) {
-      return data.settings.settings || {};
+      return data.settings?.settings || {};
     }
   } catch (error) {
     console.error("Failed to load anonymization settings:", error);

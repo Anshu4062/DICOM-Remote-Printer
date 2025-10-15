@@ -27,76 +27,100 @@ export async function POST(req: NextRequest) {
         { status: 404 }
       );
     }
+    // Determine exactly which files to send: use the most recent 'uploaded' entry's files
+    const latestUpload: any = await ImageHistory.findOne({
+      userId,
+      action: "uploaded",
+    })
+      .sort({ createdAt: -1 })
+      .lean();
 
-    // Check if there are any files to send (allow extensionless and .dcm/.dicom)
-    const filesToSend = readdirSync(uploadDir).filter(
-      (f) => !f.endsWith(".tmp") && !f.endsWith(".part")
-    );
-    if (filesToSend.length === 0) {
+    let filesToSend: string[] = [];
+    if (
+      latestUpload?.metadata?.files &&
+      Array.isArray(latestUpload.metadata.files)
+    ) {
+      filesToSend = latestUpload.metadata.files as string[];
+    } else if (latestUpload?.filename) {
+      // Fallback to the single file name
+      filesToSend = [latestUpload.filename];
+    } else {
+      // As a last resort, send nothing and ask user to upload first
       return NextResponse.json(
-        { error: "No DICOM files found in your upload directory to send." },
+        { error: "No recent upload found to send. Please upload first." },
         { status: 404 }
       );
     }
 
-    // Build storescu command to send all files in user's upload directory (recursively)
-    // Requires DCMTK storescu to be available in PATH
-    const targetPath =
-      process.platform === "win32" ? `"${uploadDir}"` : uploadDir;
-    const args = [
-      "-aet",
-      callingAET,
-      "-aec",
-      calledAET,
-      "-v", // verbose output
-      "-nh", // do not halt on unsuccessful store
-      host,
-      String(port),
-      "+sd",
-      "+r",
-      targetPath,
-    ];
+    // Map to absolute paths and filter out missing or non-DICOM/zip artifacts
+    const filePaths = filesToSend
+      .map((f) => join(uploadDir, f))
+      .filter((p) => existsSync(p));
+    if (filePaths.length === 0) {
+      return NextResponse.json(
+        { error: "Selected files not found on disk. Please re-upload." },
+        { status: 404 }
+      );
+    }
 
-    // Try to run `storescu` from PATH
-    const child = spawn("storescu", args, {
-      shell: process.platform === "win32",
-    });
-
+    // Some DCMTK versions (e.g., 3.6.9) don't support --read-from-stdin.
+    // To avoid Windows command-length limits, send in batches.
+    const batchSize = 20;
     let stdout = "";
     let stderr = "";
-    let spawnErr: any = null;
+    for (let i = 0; i < filePaths.length; i += batchSize) {
+      const batch = filePaths.slice(i, i + batchSize);
+      const args = [
+        "-aet",
+        callingAET,
+        "-aec",
+        calledAET,
+        "-v",
+        "-nh",
+        host,
+        String(port),
+        ...batch,
+      ];
 
-    await new Promise<void>((resolve) => {
-      child.stdout.on("data", (d) => (stdout += d.toString()));
-      child.stderr.on("data", (d) => (stderr += d.toString()));
-      child.on("error", (e) => {
-        spawnErr = e;
+      const child = spawn("storescu", args, {
+        shell: false,
       });
-      child.on("close", () => resolve());
-    });
 
-    if (spawnErr) {
-      return NextResponse.json(
-        {
-          error: `Failed to run storescu: ${spawnErr.message}`,
-          stdout,
-          stderr,
-        },
-        { status: 500 }
-      );
+      let spawnErr: any = null;
+      await new Promise<void>((resolve) => {
+        child.stdout.on("data", (d) => (stdout += d.toString()));
+        child.stderr.on("data", (d) => (stderr += d.toString()));
+        child.on("error", (e) => {
+          spawnErr = e;
+        });
+        child.on("close", (code) => {
+          if (typeof code === "number" && code !== 0) {
+            spawnErr = new Error(`storescu exited with code ${code}`);
+          }
+          resolve();
+        });
+      });
+
+      if (spawnErr) {
+        return NextResponse.json(
+          {
+            error: `Failed to run storescu: ${spawnErr.message}`,
+            stdout,
+            stderr,
+            batchStart: i,
+            batchEnd: Math.min(i + batchSize, filePaths.length),
+          },
+          { status: 500 }
+        );
+      }
     }
 
-    const status = child.exitCode ?? 0;
-    if (status !== 0) {
-      return NextResponse.json(
-        { error: `storescu exited with code ${status}`, stdout, stderr },
-        { status: 500 }
-      );
-    }
+    return NextResponse.json({ status: 0, stdout, stderr });
 
     // Save history entries for sent files
     const endpoint = { callingAET, calledAET, host, port };
-    for (const filename of filesToSend) {
+    for (const absPath of filePaths) {
+      const filename = absPath.split(/\\|\//).pop() as string;
       const historyEntry = new ImageHistory({
         userId,
         filename,

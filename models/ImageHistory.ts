@@ -28,6 +28,7 @@ export interface IImageHistory extends Document {
     institutionName?: string;
     institutionalDepartmentName?: string;
     referringPhysicianName?: string;
+    sequenceName?: string;
   };
   endpoint?: {
     callingAET: string;

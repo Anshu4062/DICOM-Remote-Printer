@@ -1,0 +1,15 @@
+{
+  "patientName": "dubai study",
+  "patientId": "FWEAP19000010232",
+  "patientSex": "M",
+  "patientBirthDate": "19730310",
+  "modality": "OT",
+  "studyDescription": "MR kregoslupa LS z kontrastem",
+  "institutionName": "Wizjamed",
+  "stationName": "dubai study",
+  "studyInstanceUID": "1.3.6.1.4.1.22410.204790400920431059496084729138320986424",
+  "seriesInstanceUID": "1.3.6.1.4.1.22410.0000.3333.6897410532",
+  "studyId": "16275",
+  "accessionNumber": "FWEAB19000010101",
+  "referringPhysicianName": "Dragon^Maciej^^8732055"
+}

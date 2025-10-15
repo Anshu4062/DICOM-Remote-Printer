@@ -43,3 +43,24 @@ export async function POST(req: NextRequest) {
     );
   }
 }
+
+export async function DELETE(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const { id } = body || {};
+    if (!id) {
+      return NextResponse.json(
+        { success: false, error: "Missing id" },
+        { status: 400 }
+      );
+    }
+    await dbConnect();
+    await DicomEndpoint.findByIdAndDelete(id);
+    return NextResponse.json({ success: true }, { status: 200 });
+  } catch (e) {
+    return NextResponse.json(
+      { success: false, error: "Failed" },
+      { status: 500 }
+    );
+  }
+}

@@ -28,37 +28,68 @@ function getRegistry() {
   return global.__SCP_REGISTRY__;
 }
 
-// Function to organize received files by Study UID
+// Function to organize received files by Year/Month/Day/PatientName/StudyUID
 async function organizeFileByStudyUID(filePath: string, userId: string) {
   try {
-    // Use dcmdump to extract Study Instance UID
     const { exec } = await import("child_process");
     const { promisify } = await import("util");
     const execAsync = promisify(exec);
 
     const { stdout } = await execAsync(`dcmdump "${filePath}"`);
 
-    // Extract Study Instance UID from dcmdump output
     const studyUIDMatch = stdout.match(/\(0020,000d\)\s+UI\s+\[([^\]]+)\]/i);
+    const patientNameMatch = stdout.match(/\(0010,0010\)\s+PN\s+\[([^\]]*)\]/i);
+
+    const now = new Date();
+    const year = String(now.getFullYear());
+    const monthNames = [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ];
+    const month = monthNames[now.getMonth()];
+    const day = String(now.getDate()).padStart(2, "0");
+
+    const patientNameRaw = (
+      patientNameMatch && patientNameMatch[1] ? patientNameMatch[1] : "Unknown"
+    ).trim();
+    const safePatientName =
+      patientNameRaw.replace(/[\\/:*?"<>|]/g, "_") || "Unknown";
+
     if (studyUIDMatch && studyUIDMatch[1]) {
       const studyUID = studyUIDMatch[1].trim();
-
-      // Create Study UID folder
-      const studyDir = join(process.cwd(), "receives", userId, studyUID);
-      if (!existsSync(studyDir)) {
-        mkdirSync(studyDir, { recursive: true });
+      const destDir = join(
+        process.cwd(),
+        "receives",
+        userId,
+        year,
+        month,
+        day,
+        safePatientName,
+        studyUID
+      );
+      if (!existsSync(destDir)) {
+        mkdirSync(destDir, { recursive: true });
       }
 
-      // Move file to Study UID folder
       const fileName = filePath.split("/").pop() || filePath.split("\\").pop();
-      const newPath = join(studyDir, fileName || "unknown.dcm");
+      const newPath = join(destDir, fileName || "unknown.dcm");
 
       const { rename } = await import("fs");
       const renameAsync = promisify(rename);
       await renameAsync(filePath, newPath);
 
       console.log(
-        `[File Organizer] Moved ${fileName} to Study UID folder: ${studyUID}`
+        `[File Organizer] Moved ${fileName} to ${year}/${month}/${day}/${safePatientName}/${studyUID}`
       );
       return newPath;
     }

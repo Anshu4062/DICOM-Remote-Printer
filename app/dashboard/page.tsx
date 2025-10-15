@@ -78,6 +78,7 @@ interface ImageMetadata {
   softwareVersions?: string;
   protocolName?: string;
   reconstructionDiameter?: string;
+  sequenceName?: string;
   gantryDetectorTilt?: string;
   tableHeight?: string;
   rotationDirection?: string;
@@ -288,6 +289,16 @@ export default function Dashboard() {
       }
     };
     loadAnonymizationSettings();
+    // Also refresh settings on window focus and periodically, so admin changes reflect without reload
+    const handleFocus = () => {
+      loadAnonymizationSettings();
+    };
+    window.addEventListener("focus", handleFocus);
+    const intervalId = setInterval(loadAnonymizationSettings, 5000);
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+      clearInterval(intervalId);
+    };
   }, [user?.id]);
 
   useEffect(() => {
@@ -1986,6 +1997,15 @@ export default function Dashboard() {
                                       </span>
                                       <span className="ml-1 font-mono font-semibold text-gray-800">
                                         {studyIdVal}
+                                      </span>
+                                    </div>
+                                    <div className="text-sm mt-1">
+                                      <span className="font-medium text-gray-600">
+                                        Sequence Name:
+                                      </span>
+                                      <span className="ml-1 font-mono font-semibold text-gray-800">
+                                        {anonymizedMetadata?.sequenceName ||
+                                          "-"}
                                       </span>
                                     </div>
                                   </td>

@@ -27,37 +27,34 @@ export async function POST(req: NextRequest) {
         ? join(process.cwd(), "receives", userId)
         : join(process.cwd(), "uploads", userId);
 
-    // For received files, check if filename contains Study UID path
+    // Resolve file path, recursively for received (Year/Month/Day/Patient/StudyUID)
     let filePath = join(baseDir, filename);
-
-    // If file doesn't exist at root level, check if it's in a Study UID subdirectory
     if (!existsSync(filePath) && scope === "received") {
-      // Try to find the file in any Study UID subdirectory
-      try {
-        const items = readdirSync(baseDir);
-        for (const item of items) {
-          const itemPath = join(baseDir, item);
-          const stats = statSync(itemPath);
-          if (stats.isDirectory()) {
-            const potentialPath = join(itemPath, filename);
-            if (existsSync(potentialPath)) {
-              filePath = potentialPath;
-              break;
+      const findRecursively = (dir: string, target: string): string | null => {
+        try {
+          const items = readdirSync(dir);
+          for (const item of items) {
+            const itemPath = join(dir, item);
+            const st = statSync(itemPath);
+            if (st.isDirectory()) {
+              const nested = findRecursively(itemPath, target);
+              if (nested) return nested;
+            } else if (item === target) {
+              return itemPath;
             }
           }
-        }
-      } catch (error) {
-        console.error(
-          "Error searching for file in Study UID directories:",
-          error
-        );
-      }
+        } catch {}
+        return null;
+      };
+      const found = findRecursively(baseDir, filename);
+      if (found) filePath = found;
     }
 
     // Check JSON cache first
     try {
       const cacheDir = join(baseDir, "_meta");
-      const cachePath = join(cacheDir, `${filename}.json`);
+      const safeName = String(filename).replace(/[\\/]/g, "__");
+      const cachePath = join(cacheDir, `${safeName}.json`);
       if (existsSync(cachePath)) {
         const { readFileSync } = await import("fs");
         const json = readFileSync(cachePath, "utf8");
@@ -243,11 +240,12 @@ export async function POST(req: NextRequest) {
 
       metadata = parseDicomMetadata(stdout);
       try {
-        const cacheDir = join(process.cwd(), "uploads", userId, "_meta");
+        const cacheDir = join(baseDir, "_meta");
         if (!existsSync(cacheDir))
           require("fs").mkdirSync(cacheDir, { recursive: true });
+        const safeName = String(filename).replace(/[\\/]/g, "__");
         require("fs").writeFileSync(
-          join(cacheDir, `${filename}.json`),
+          join(cacheDir, `${safeName}.json`),
           JSON.stringify(metadata, null, 2)
         );
       } catch {}
